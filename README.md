@@ -227,3 +227,4 @@ defaults:
   backend, where `opencode run` submits the prompt fine.
 - **`herdr pane run` re-parses its command through a shell**, so anything passed
   to it needs quoting rather than argv splitting.
+# rigg
