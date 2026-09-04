@@ -68,6 +68,9 @@ enum Cmd {
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
+        /// Internal: this process is the detached worker for a queued add.
+        #[arg(long, hide = true)]
+        worker: bool,
     },
     /// Open an interactive agent on a stack, resuming its session.
     Attach {
@@ -82,6 +85,9 @@ enum Cmd {
         /// Open even though a run is still in progress.
         #[arg(long)]
         force: bool,
+        /// Wait for the run to finish, then open its session.
+        #[arg(long)]
+        wait: bool,
         /// Agent role to open (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
@@ -310,9 +316,20 @@ fn real_main() -> Result<()> {
     match cli.cmd {
         Cmd::PluginRun | Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
-            let path = Config::path_for(&root);
+            let [preferred, legacy] = Config::candidates(&root);
+            if legacy.exists() && !force {
+                bail!(
+                    "{} already exists; move it to {} or pass --force",
+                    legacy.display(),
+                    preferred.display()
+                );
+            }
+            let path = preferred;
             if path.exists() && !force {
                 bail!("{} already exists (use --force)", path.display());
+            }
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d)?;
             }
             std::fs::write(&path, config::TEMPLATE)?;
             println!("wrote {}", path.display());
@@ -401,6 +418,7 @@ fn real_main() -> Result<()> {
             branch,
             headless,
             fg,
+            worker,
         } => {
             let st = Stacks::load(&root)?;
             if !st.stacks.contains_key(&stack) {
@@ -412,27 +430,86 @@ fn real_main() -> Result<()> {
             }
             let n = st.stacks[&stack].len() + 1;
             let branch = branch.unwrap_or_else(|| format!("{stack}-{n}"));
-            let path = push_stack(
-                &root,
-                cli.config.as_deref(),
-                &branch,
-                None,
-                Some(stack),
-                false,
-            )?;
-            let opts = RunOpts { pipeline, task: prompt, headless, ..Default::default() };
-            if fg {
-                execute(&path, None, opts)?;
-            } else {
-                start_detached(&root, &path, &branch, opts)?;
+
+            // Queueing happens in the detached worker, not here, so the shell
+            // comes straight back even when the tip is still running.
+            if !fg && !worker {
+                start_queued_add(
+                    &root, &stack, &branch, prompt.as_deref(), pipeline.as_deref(), headless,
+                )?;
+                return Ok(());
             }
+
+            // The worker owns an entry reserved at queue time; its base is the
+            // branch immediately below it in the stack.
+            let base = st
+                .find(&branch)
+                .map(|e| e.base.clone())
+                .or_else(|| st.tip_of(&stack).map(|e| e.branch.clone()))
+                .context("nothing to build on")?;
+
+            if let Some(pid) = running_pid(&root, &base) {
+                println!("waiting for `{base}` to finish (pid {pid})...");
+                while running_pid(&root, &base).is_some() {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                println!("`{base}` finished");
+            }
+            if let Some(st) = last_status(&root, &base) {
+                if st != "ok" {
+                    bail!(
+                        "not branching `{branch}`: the run on `{base}` did not \
+                         succeed ({st}). Fix it, then `rigg add {stack} \"...\"` again."
+                    );
+                }
+            }
+
+            let cfg = Config::load(&root, cli.config.as_deref()).unwrap_or_default();
+            // Anything left uncommitted on the base would not reach this branch.
+            if let Some(dir) = st.find(&base).and_then(|e| entry_path(&root, e).ok()) {
+                let dirty = util::git(std::path::Path::new(&dir), &["status", "--porcelain"])
+                    .map(|o| !o.trim().is_empty())
+                    .unwrap_or(false);
+                if dirty {
+                    bail!(
+                        "`{base}` has uncommitted changes in {dir}, which `{branch}` \
+                         would not include. Its pipeline needs a commit step."
+                    );
+                }
+            }
+
+            println!("creating worktree {branch} on top of {base}");
+            let path = create_worktree(&root, &cfg, &branch, &base)?;
+            let mut st = Stacks::load(&root)?;
+            if let Some(e) = st
+                .stacks
+                .get_mut(&stack)
+                .and_then(|es| es.iter_mut().find(|e| e.branch == branch))
+            {
+                e.path = Some(path.clone());
+            } else {
+                st.stacks.entry(stack.clone()).or_default().push(Entry {
+                    branch: branch.clone(),
+                    base: base.clone(),
+                    path: Some(path.clone()),
+                    pr: None,
+                });
+            }
+            st.save(&root)?;
+            println!("worktree at {path}");
+
+            execute(
+                std::path::Path::new(&path),
+                None,
+                RunOpts { pipeline, task: prompt, headless, ..Default::default() },
+            )?;
         }
 
         Cmd::Logs { target, follow } => {
             let st = Stacks::load(&root)?;
             let branch = match target {
-                Some(t) => resolve_target(&st, &t).map(|e| e.branch).unwrap_or(t),
-                None => pick_stack(&st)?.branch,
+                Some(t) => resolve_target(&root, &st, &t).map(|e| e.branch).unwrap_or(t),
+                None => pick_stack(&root, &st)?.branch,
             };
             let log = log_path(&root, &branch)?;
             if !log.exists() {
@@ -453,18 +530,19 @@ fn real_main() -> Result<()> {
             path: path_only,
             new,
             force,
+            wait,
             agent,
         } => {
             let st = Stacks::load(&root)?;
             let entry = match target {
-                Some(t) => resolve_target(&st, &t)?,
+                Some(t) => resolve_target(&root, &st, &t)?,
                 // No target: prefer the stack we are standing in, else choose.
                 None => match util::current_branch(&root)
                     .ok()
-                    .and_then(|b| resolve_target(&st, &b).ok())
+                    .and_then(|b| resolve_target(&root, &st, &b).ok())
                 {
                     Some(e) => e,
-                    None => pick_stack(&st)?,
+                    None => pick_stack(&root, &st)?,
                 },
             };
             let dir = entry_path(&root, &entry)?;
@@ -489,15 +567,26 @@ fn real_main() -> Result<()> {
             // open, so attaching mid-run gives "No conversation found to
             // continue" rather than the session you wanted.
             if let Some(pid) = running_pid(&root, &entry.branch) {
-                if !force {
+                if wait {
+                    println!("waiting for the run on `{}` to finish (pid {pid})...", entry.branch);
+                    while running_pid(&root, &entry.branch).is_some() {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    println!("run finished");
+                } else if !force {
                     bail!(
-                        "`{}` is still running (pid {pid}). Watch it with `rigg logs {} -f`, \
-                         or pass --force to open a separate session alongside it.",
+                        "`{}` is still running (pid {pid}).\n  \
+                         rigg logs {} -f        watch it\n  \
+                         rigg attach {} --wait  open it as soon as it finishes\n  \
+                         rigg attach {} --force open a second session alongside it",
+                        entry.branch,
+                        entry.branch,
                         entry.branch,
                         entry.branch
                     );
+                } else {
+                    println!("warning: a run is still in progress (pid {pid})");
                 }
-                println!("warning: a run is still in progress (pid {pid})");
             }
 
             let cfg = Config::load(std::path::Path::new(&dir), None)?;
@@ -537,8 +626,8 @@ fn real_main() -> Result<()> {
         } => {
             let st = Stacks::load(&root)?;
             let (entry, message) = match message {
-                Some(m) => (resolve_target(&st, &target)?, m),
-                None => (pick_stack(&st)?, target),
+                Some(m) => (resolve_target(&root, &st, &target)?, m),
+                None => (pick_stack(&root, &st)?, target),
             };
             let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
             let cfg = Config::load(&dir, None)?;
@@ -669,13 +758,13 @@ fn shellexpand_home(p: &str) -> String {
 
 /// Choose a stack interactively: one stack needs no choosing, fzf is used when
 /// present, otherwise a numbered list.
-fn pick_stack(st: &Stacks) -> Result<Entry> {
+fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
     if st.stacks.is_empty() {
         bail!("no stacks; start one with `rigg new \"<task>\"`");
     }
     let names: Vec<&String> = st.stacks.keys().collect();
     if names.len() == 1 {
-        return resolve_target(st, names[0]);
+        return resolve_target(root, st, names[0]);
     }
 
     if which("fzf") {
@@ -695,7 +784,7 @@ fn pick_stack(st: &Stacks) -> Result<Entry> {
         if choice.is_empty() {
             bail!("nothing selected");
         }
-        return resolve_target(st, &choice);
+        return resolve_target(root, st, &choice);
     }
 
     for (i, n) in names.iter().enumerate() {
@@ -706,10 +795,32 @@ fn pick_stack(st: &Stacks) -> Result<Entry> {
     let answer = ask("stack> ")?;
     if let Ok(n) = answer.parse::<usize>() {
         if n >= 1 && n <= names.len() {
-            return resolve_target(st, names[n - 1]);
+            return resolve_target(root, st, names[n - 1]);
         }
     }
-    resolve_target(st, &answer)
+    resolve_target(root, st, &answer)
+}
+
+fn status_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
+    Ok(util::state_dir(root)?
+        .join("run")
+        .join(format!("{}.status", branch.replace('/', "-"))))
+}
+
+/// How the last run on this branch ended, if it has ended.
+fn last_status(root: &std::path::Path, branch: &str) -> Option<String> {
+    std::fs::read_to_string(status_path(root, branch).ok()?)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn record_status(root: &std::path::Path, branch: &str, outcome: &str) {
+    if let Ok(p) = status_path(root, branch) {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(p, outcome);
+    }
 }
 
 fn pid_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
@@ -749,6 +860,139 @@ fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> 
         .join(format!("{}.log", branch.replace('/', "-"))))
 }
 
+/// Create the worktree for `branch` off `base`, returning its path.
+fn create_worktree(
+    root: &std::path::Path,
+    cfg: &Config,
+    branch: &str,
+    base: &str,
+) -> Result<String> {
+    let from = util::main_checkout(root)?;
+    if util::git(&from, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .is_ok()
+    {
+        bail!("branch `{branch}` already exists");
+    }
+    let use_herdr = cfg.backend != Backend::Headless && herdr::inside_session();
+    let mut path = if use_herdr {
+        herdr::worktree_create(branch, base, &from.to_string_lossy())?
+    } else {
+        let dest = worktree_dest(cfg, &from, branch);
+        util::git_worktree_add(&from, branch, base, &dest)?;
+        dest.to_string_lossy().to_string()
+    };
+    if path.is_empty() {
+        path = util::worktree_path(&from, branch).unwrap_or_default();
+    }
+    if path.is_empty() {
+        bail!("worktree for `{branch}` was created but its path could not be resolved");
+    }
+    Ok(path)
+}
+
+/// Detach a worker that waits for the stack's tip, then branches and runs.
+fn start_queued_add(
+    root: &std::path::Path,
+    stack: &str,
+    branch: &str,
+    prompt: Option<&str>,
+    pipeline: Option<&str>,
+    headless: bool,
+) -> Result<()> {
+    if let Some(id) = confirm_step(root, None, pipeline) {
+        bail!(
+            "step `{id}` asks for confirmation, which a detached run cannot do. \
+             Run it with --fg, or drop `confirm` from that step."
+        );
+    }
+    // Record the entry now, not when the worker runs, so a further `add` sees
+    // this branch as the tip and chains behind it instead of reusing its name.
+    let mut st = Stacks::load(root)?;
+    let base = st
+        .tip_of(stack)
+        .map(|e| e.branch.clone())
+        .context("stack has no entries to build on")?;
+    st.stacks.entry(stack.to_string()).or_default().push(Entry {
+        branch: branch.to_string(),
+        base: base.clone(),
+        path: None,
+        pr: None,
+    });
+    st.save(root)?;
+
+    let log = log_path(root, branch)?;
+    if let Some(p) = log.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let out = std::fs::File::create(&log)?;
+    let errs = out.try_clone()?;
+
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = vec![
+        "add".into(),
+        stack.into(),
+    ];
+    if let Some(p) = prompt {
+        args.push(p.to_string());
+    }
+    args.push("--branch".into());
+    args.push(branch.into());
+    args.push("--worker".into());
+    if let Some(p) = pipeline {
+        args.push("--pipeline".into());
+        args.push(p.to_string());
+    }
+    if headless {
+        args.push("--headless".into());
+    }
+
+    let mut cmd = if which("setsid") {
+        let mut c = std::process::Command::new("setsid");
+        c.arg(&exe).args(&args);
+        c
+    } else {
+        let mut c = std::process::Command::new(&exe);
+        c.args(&args);
+        c
+    };
+    let child = cmd
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(errs)
+        .spawn()
+        .context("could not queue the run")?;
+
+    // Recorded under the new branch so `stack list` shows it and a further
+    // `add` queues behind this one in turn.
+    let pid = pid_path(root, branch)?;
+    if let Some(p) = pid.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(&pid, child.id().to_string())?;
+
+    match running_pid(root, &base) {
+        Some(p) => println!("queued `{branch}` behind `{base}` (pid {p})"),
+        None => println!("started `{branch}` on top of `{base}`"),
+    }
+    println!("  rigg logs {branch} -f");
+    Ok(())
+}
+
+/// The first step that would stop to ask something, if any.
+fn confirm_step(
+    root: &std::path::Path,
+    cfg_path: Option<&str>,
+    pipeline: Option<&str>,
+) -> Option<String> {
+    let cfg = Config::load(root, cfg_path).ok()?;
+    cfg.steps_for(pipeline)
+        .ok()?
+        .into_iter()
+        .find(|s| s.confirm)
+        .map(|s| s.id)
+}
+
 /// Run the pipeline in the background so the terminal comes straight back.
 fn start_detached(
     root: &std::path::Path,
@@ -756,12 +1000,19 @@ fn start_detached(
     branch: &str,
     o: RunOpts,
 ) -> Result<()> {
+    if let Some(id) = confirm_step(root, None, o.pipeline.as_deref()) {
+        bail!(
+            "step `{id}` asks for confirmation, which a detached run cannot do. \
+             Run it with --fg, or drop `confirm` from that step."
+        );
+    }
     let log = log_path(root, branch)?;
     if let Some(p) = log.parent() {
         std::fs::create_dir_all(p)?;
     }
     let out = std::fs::File::create(&log)?;
     let errs = out.try_clone()?;
+    let _ = std::fs::remove_file(status_path(root, branch)?);
 
     let exe = std::env::current_exe()?;
     let mut args: Vec<String> = vec!["run".into()];
@@ -816,10 +1067,24 @@ fn stack_names(st: &Stacks) -> String {
     }
 }
 
-/// Resolve a stack name (to its tip) or a branch name (to itself).
-fn resolve_target(st: &Stacks, name: &str) -> Result<Entry> {
-    if let Some(e) = st.tip_of(name) {
-        return Ok(e.clone());
+/// Resolve a branch name to itself, or a stack name to the branch you most
+/// likely mean: the one being worked on now, else the newest that exists on
+/// disk. The tip of a queued stack is usually still waiting and has no
+/// checkout yet, so it is the wrong answer.
+fn resolve_target(root: &std::path::Path, st: &Stacks, name: &str) -> Result<Entry> {
+    if let Some(entries) = st.stacks.get(name) {
+        if let Some(e) = entries
+            .iter()
+            .find(|e| running_pid(root, &e.branch).is_some() && entry_path(root, e).is_ok())
+        {
+            return Ok(e.clone());
+        }
+        if let Some(e) = entries.iter().rev().find(|e| entry_path(root, e).is_ok()) {
+            return Ok(e.clone());
+        }
+        if let Some(e) = entries.last() {
+            return Ok(e.clone());
+        }
     }
     if let Some(e) = st.find(name) {
         return Ok(e.clone());
@@ -881,9 +1146,15 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
             bail!("no steps matched --only");
         }
     }
-    let needs_task = steps
-        .iter()
-        .any(|s| s.prompt.as_deref().is_some_and(|p| p.contains("{{task}}")));
+    let mut needs_task = false;
+    for step in &steps {
+        if let Some(p) = step.prompt_text(&cfg.dir)? {
+            if p.contains("{{task}}") {
+                needs_task = true;
+                break;
+            }
+        }
+    }
     let task = match o.task {
         Some(t) => t,
         None if needs_task => ask("Task: ")?,
@@ -911,7 +1182,18 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     }
     println!("rigg: {} step(s) on {branch} (base {base})", steps.len());
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run, o.headless);
-    runner.run(&steps)?;
+    let outcome = runner.run(&steps);
+    if !o.dry_run {
+        record_status(
+            root,
+            &branch,
+            &match &outcome {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("failed: {e}"),
+            },
+        );
+    }
+    outcome?;
     println!("\nrigg: pipeline complete");
     if !o.dry_run {
         herdr::notify(&format!("rigg: {branch} pipeline complete"));
@@ -1230,7 +1512,19 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>, force_headless: bool) 
         None => Config::path_for(root),
     };
     match &cfg {
-        Ok(c) => println!("config         ok ({} steps)", c.steps.len()),
+        Ok(c) => {
+            let n = c.steps_for(None).map(|s| s.len()).unwrap_or(0);
+            let named: Vec<&str> = c.pipelines.keys().map(|s| s.as_str()).collect();
+            let which = c.default_pipeline.as_deref().unwrap_or("steps");
+            if named.is_empty() {
+                println!("config         ok ({n} steps)");
+            } else {
+                println!(
+                    "config         ok (default `{which}`: {n} steps; pipelines: {})",
+                    named.join(", ")
+                );
+            }
+        }
         Err(e) if path.exists() => {
             println!("config         INVALID: {e:#}");
             problems += 1;

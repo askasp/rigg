@@ -54,6 +54,9 @@ rigg logs billing -f              # follow a run
 rigg stack names                  # for shell completion
 ```
 
+A step marked `confirm` cannot run detached - there is no terminal to answer it -
+so `new` and `add` say so up front rather than skipping the step silently.
+
 `new` and `add` return the terminal immediately and run the pipeline detached,
 logging to `.git/rigg/logs/<branch>.log`; pass `--fg` to run in the terminal
 instead. Given a single argument that reads like a sentence, `new` treats it as
@@ -63,16 +66,19 @@ the task and generates a stack name.
 there; `say` continues the agent session in that stack's tip rather than running
 a pipeline. `attach` opens an interactive agent on the stack's checkout, resuming the
 session the pipeline was using (`--continue`), so you can take over by hand. It
-refuses while a run is still in flight - claude will not resume a conversation
-its own process still has open - so watch that with `rigg logs -f` and attach
-once it finishes, or `--force` to open a separate session alongside it. Stacks
+refuses while a run is still in flight - a headless step owns its conversation
+for as long as it runs, and claude will not resume one another process still has
+open. Use `rigg logs -f` to watch, `--wait` to open the session the moment the
+run finishes, or `--force` to start a second session alongside it. Stacks
 with a run in flight are marked `[running]` by `rigg stack list`.
 `--new` starts a fresh session instead, `--path` only prints the directory, and
 under herdr it focuses the existing workspace rather than starting a second
 agent on the same checkout.
 
-A stack name resolves to its tip, and a branch name to itself, so both
-`rigg say billing` and `rigg say billing-2` work.
+A branch name resolves to itself. A stack name resolves to the branch you most
+likely mean - the one being worked on now, else the newest that exists on disk -
+because the tip of a queued stack is usually still waiting and has no checkout
+yet. So `rigg attach billing` reaches whichever branch of that stack is running.
 
 ### Shell integration
 
@@ -99,6 +105,50 @@ Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`.
 Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
+
+### Watching a run
+
+`claude -p` prints nothing until its turn ends, which makes a long step look
+hung. rigg runs it with `--output-format stream-json` instead and prints a line
+per event, so `rigg logs <stack> -f` shows the text and each tool call as they
+happen:
+
+```
+I'll read the file first.
+  · Read calc.py
+  · Edit calc.py
+```
+
+### Queueing a stack
+
+`rigg add` returns immediately and queues, so a stack can be filled in one go
+and left to run - each branch its own small PR:
+
+```sh
+rigg new billing   "Add proration to subscription changes"
+rigg add billing   "Expose it in the API"
+rigg add billing   "Show it in the invoice view"
+```
+
+```
+billing
+  1. billing   <- main      [running]
+  2. billing-2 <- billing   [running]
+  3. billing-3 <- billing-2 [running]
+```
+
+There is no daemon. Each `add` reserves its entry in `stack.json`, writes a pid
+file, and detaches a worker under `setsid` that polls until the run on its base
+finishes; then it creates the worktree from that base's final commit and runs
+the pipeline. So the queue is a chain of waiters, each watching the one below.
+
+A worker refuses to branch when its base's run did not succeed, or left work
+uncommitted - either way the new branch would not contain what it should. Runs
+record their outcome in `.git/rigg/run/<branch>.status`.
+
+Everything lives in `.git/rigg/`: `stack.json`, `logs/<branch>.log`,
+`run/<branch>.pid` and `run/<branch>.status`. Queued workers do not survive a
+reboot; re-run `rigg add` for anything that was still waiting.
 
 ### Stacking needs commits
 
@@ -137,6 +187,42 @@ directory. The main checkout and the worktree you run it from are never
 candidates.
 
 ## Config
+
+`.rigg/rigg.toml` in the repo (a plain `rigg.toml` at the root still works, and
+`.rigg/` wins if both exist). Keeping it in a directory leaves somewhere for the
+prompts to live:
+
+```
+.rigg/
+  rigg.toml
+  reviewer.md
+```
+
+The pipeline that runs when none is named is the top-level `[[steps]]`. To make
+a named one the default instead:
+
+```toml
+default_pipeline = "quick"
+
+[[pipelines.quick.steps]]
+id = "implement"
+```
+
+`--pipeline <name>` and `rigg <name> new ...` still override it. Note that
+setting `default_pipeline` leaves the top-level `[[steps]]` with no way to be
+selected, so put every pipeline under `[pipelines]` if you use it.
+
+A step takes either an inline `prompt` or a `prompt_file` relative to the config
+directory - both get the same `{{task}}` / `{{branch}}` / `{{base}}` / `{{repo}}`
+substitution:
+
+```toml
+[[steps]]
+id = "review"
+agent = "impl"
+clear = true
+prompt_file = "reviewer.md"
+```
 
 ```toml
 [agents.impl]

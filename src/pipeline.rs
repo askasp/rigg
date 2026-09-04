@@ -123,7 +123,15 @@ impl Runner {
         print!("  run step `{}`? [y/N] ", step.id);
         std::io::stdout().flush()?;
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        // With no terminal the read returns EOF immediately. Treating that as
+        // "no" would silently skip the step and report it as the user's choice.
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            bail!(
+                "step `{}` asks for confirmation but there is no terminal to ask. \
+                 Run with --fg, or drop `confirm` from the step.",
+                step.id
+            );
+        }
         Ok(matches!(line.trim(), "y" | "Y" | "yes"))
     }
 
@@ -147,7 +155,10 @@ impl Runner {
         let role = step.agent.clone().expect("validated: prompt implies agent");
         let acfg = self.cfg.agents[&role].clone();
         let kind = acfg.kind.clone();
-        let text = util::render(step.prompt.as_deref().unwrap_or(""), &self.vars);
+        let raw = step
+            .prompt_text(&self.cfg.dir)?
+            .unwrap_or_default();
+        let text = util::render(&raw, &self.vars);
 
         if self.backend_for(&role) == Backend::Headless {
             // A one-shot invocation has no session to clear, so `clear` inverts
