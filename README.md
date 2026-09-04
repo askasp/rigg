@@ -71,6 +71,10 @@ for as long as it runs, and claude will not resume one another process still has
 open. Use `rigg logs -f` to watch, `--wait` to open the session the moment the
 run finishes, or `--force` to start a second session alongside it. Stacks
 with a run in flight are marked `[running]` by `rigg stack list`.
+It resumes by session id and prints which one, rather than relying on
+`--continue`, and says plainly when a checkout has no previous session instead
+of leaving claude to report that it found nothing.
+
 `--new` starts a fresh session instead, `--path` only prints the directory, and
 under herdr it focuses the existing workspace rather than starting a second
 agent on the same checkout.
@@ -102,9 +106,33 @@ loaded in the current shell.
 
 Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`.
 
+`say` with no arguments picks a stack and then asks what to send, the same shape
+as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
+that is still running, has uncommitted work, or holds commits that are not on
+the trunk, unless `--force`; like `prune` it is a dry run until `--yes`.
+
 Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
+
+### Reading a log
+
+A run's log opens with the branch, the pipeline and the whole task, then rules
+off each step with a timestamp and reports how long it took:
+
+```
+rigg  billing  (base main, pipeline full, 9 steps)
+task  Add proration to subscription changes so a mid-cycle upgrade
+      bills the difference rather than the full period
+
+---- [1/9] implement ------------------------------------------- 20:34:44
+  -> [impl] claude -p --continue ...
+  · Edit backend/src/billing/proration.ts
+  ok (2m14s)
+```
+
+A multi-line `run` step shows its first line and a line count rather than its
+whole body.
 
 ### Watching a run
 
@@ -177,6 +205,10 @@ continues the stack holding the current branch; otherwise it starts a new stack
 named after the branch. `--base` always means "root a new stack here". So
 running it twice from the trunk gives two independent stacks rather than
 accidentally piling the second onto the first.
+
+`stack pr` adds the preview label through the REST API rather than
+`gh pr edit --add-label`, which still queries Projects (classic) and therefore
+fails outright on GitHub today.
 
 `stack prune` deletes the merged branches along with their checkouts, since
 `git branch -d` refuses anything not actually merged; pass `--keep-branches` to

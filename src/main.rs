@@ -94,8 +94,8 @@ enum Cmd {
     },
     /// Send a follow-up prompt to a stack's agent session.
     Say {
-        /// Stack or branch to talk to. Omit to choose.
-        target: String,
+        /// Stack or branch to talk to. Omit to choose from a list.
+        target: Option<String>,
         /// The message. If `target` is the only argument and reads like a
         /// sentence, it is taken as the message and the stack is chosen.
         message: Option<String>,
@@ -190,6 +190,18 @@ enum StackCmd {
         #[arg(long)]
         keep_branches: bool,
     },
+    /// Remove a whole stack: its worktrees, branches and bookkeeping.
+    Rm {
+        /// Stack to remove. Omit to choose.
+        stack: Option<String>,
+        /// Actually remove it. Without this it only shows what would go.
+        #[arg(long)]
+        yes: bool,
+        /// Remove even when a run is going, work is uncommitted, or a branch
+        /// has commits that are not on the trunk.
+        #[arg(long)]
+        force: bool,
+    },
     /// Open a PR for a stack entry against its own base.
     Pr {
         #[arg(long)]
@@ -201,7 +213,7 @@ enum StackCmd {
 /// can never describe bindings the shell does not actually have.
 const KEYS: [(&str, &str); 6] = [
     ("^X n", "rigg new \"\"  - cursor inside the quotes"),
-    ("^X m", "rigg say \"\"  - follow-up to a stack"),
+    ("^X m", "say something to a stack: pick it, then type"),
     ("^X a", "attach to a stack"),
     ("^X l", "follow a run's log"),
     ("^X s", "list stacks, keeping what you were typing"),
@@ -229,7 +241,7 @@ rigg-new-widget() { BUFFER='rigg new ""'; CURSOR=$(( ${#BUFFER} - 1 )); zle redi
 zle -N rigg-new-widget
 bindkey '^Xn' rigg-new-widget
 
-rigg-say-widget() { BUFFER='rigg say ""'; CURSOR=$(( ${#BUFFER} - 1 )); zle redisplay }
+rigg-say-widget() { BUFFER='rigg say'; zle accept-line }
 zle -N rigg-say-widget
 bindkey '^Xm' rigg-say-widget
 
@@ -346,12 +358,29 @@ fn real_main() -> Result<()> {
             if st.stacks.is_empty() {
                 println!("stacks (none)");
             } else {
+                println!();
                 for (name, entries) in &st.stacks {
-                    println!("stack  {name}");
-                    for e in entries {
+                    println!("{name}");
+                    for (i, e) in entries.iter().enumerate() {
                         let marker = if e.branch == branch { "*" } else { " " };
-                        let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        println!("    {marker} {} <- {}{}", e.branch, e.base, pr);
+                        let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
+                        let mut state = run_state(&root, &e.branch);
+                        if state.is_empty() && entry_path(&root, e).is_err() {
+                            state = "worktree gone".into();
+                        }
+                        let state = if state.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{state}]")
+                        };
+                        println!(
+                            "  {marker} {}. {:<28} <- {}{}{}",
+                            i + 1,
+                            e.branch,
+                            e.base,
+                            pr,
+                            state
+                        );
                     }
                 }
             }
@@ -606,13 +635,21 @@ fn real_main() -> Result<()> {
                 .kind
                 .clone();
 
-            // Resuming only makes sense if there is something to resume.
-            let resumable = kind != "claude" || claude_has_session(&dir);
             println!("{} in {dir}", entry.branch);
             let mut cmd = std::process::Command::new(&kind);
             cmd.current_dir(&dir);
-            if !new && resumable {
-                cmd.arg("--continue");
+            if !new {
+                match (kind.as_str(), claude_last_session(&dir)) {
+                    // Name the conversation, so it is obvious which one opened.
+                    ("claude", Some(id)) => {
+                        println!("resuming session {id}");
+                        cmd.arg("--resume").arg(id);
+                    }
+                    ("claude", None) => println!("no previous session here; starting fresh"),
+                    _ => {
+                        cmd.arg("--continue");
+                    }
+                }
             }
             // Hand the terminal over: rigg has nothing left to do.
             let err = cmd.exec();
@@ -625,9 +662,18 @@ fn real_main() -> Result<()> {
             agent,
         } => {
             let st = Stacks::load(&root)?;
-            let (entry, message) = match message {
-                Some(m) => (resolve_target(&root, &st, &target)?, m),
-                None => (pick_stack(&root, &st)?, target),
+            let (entry, message) = match (target, message) {
+                // Both given: an explicit target and its message.
+                (Some(t), Some(m)) => (resolve_target(&root, &st, &t)?, m),
+                // One argument is the message; choose who it goes to.
+                (Some(m), None) => (pick_stack(&root, &st)?, m),
+                // Nothing given: choose, then ask what to say.
+                (None, _) => {
+                    let e = pick_stack(&root, &st)?;
+                    let m = ask(&format!("say to {}> ", e.branch))
+                        .context("nothing to say")?;
+                    (e, m)
+                }
             };
             let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
             let cfg = Config::load(&dir, None)?;
@@ -660,6 +706,20 @@ fn real_main() -> Result<()> {
             } => {
                 push_stack(&root, cli.config.as_deref(), &branch, base, stack_name, false)?;
             }
+            StackCmd::Rm { stack, yes, force } => {
+                let st = Stacks::load(&root)?;
+                let name = match stack {
+                    Some(n) if st.stacks.contains_key(&n) => n,
+                    Some(n) => bail!("no stack `{n}`. Known stacks: {}", stack_names(&st)),
+                    None => {
+                        let e = pick_stack(&root, &st)?;
+                        st.stack_of(&e.branch)
+                            .map(str::to_string)
+                            .context("that branch belongs to no stack")?
+                    }
+                };
+                remove_stack(&root, &name, yes, force)?;
+            }
             StackCmd::Names => {
                 for name in Stacks::load(&root)?.stacks.keys() {
                     println!("{name}");
@@ -680,15 +740,24 @@ fn real_main() -> Result<()> {
                     println!("{name}");
                     for (i, e) in entries.iter().enumerate() {
                         let mark = if e.branch == here { "*" } else { " " };
-                        let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        let state = if running_pid(&root, &e.branch).is_some() {
-                            "  [running]"
-                        } else if entry_path(&root, e).is_ok() {
-                            ""
+                        let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
+                        let mut state = run_state(&root, &e.branch);
+                        if state.is_empty() && entry_path(&root, e).is_err() {
+                            state = "worktree gone".into();
+                        }
+                        let state = if state.is_empty() {
+                            String::new()
                         } else {
-                            "  (worktree gone)"
+                            format!("  [{state}]")
                         };
-                        println!("  {mark} {}. {} <- {}{}{}", i + 1, e.branch, e.base, pr, state);
+                        println!(
+                            "  {mark} {}. {:<28} <- {}{}{}",
+                            i + 1,
+                            e.branch,
+                            e.base,
+                            pr,
+                            state
+                        );
                     }
                 }
             }
@@ -719,10 +788,7 @@ fn real_main() -> Result<()> {
                     });
                     if frontend {
                         println!("frontend paths touched, labelling `{label}`");
-                        util::shell(
-                            &root,
-                            &format!("gh pr edit {branch} --add-label {label}"),
-                        )?;
+                        util::shell(&root, &label_command(&branch, label))?;
                     }
                 }
             }
@@ -788,11 +854,20 @@ fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
     }
 
     for (i, n) in names.iter().enumerate() {
-        let tip = st.tip_of(n).map(|e| e.branch.clone()).unwrap_or_default();
-        let extra = if &tip == *n { String::new() } else { format!("  (tip {tip})") };
-        println!("  {}  {n}{extra}", i + 1);
+        let target = resolve_target(root, st, n).ok();
+        let branch = target.as_ref().map(|e| e.branch.clone()).unwrap_or_default();
+        let extra = if &branch == *n {
+            String::new()
+        } else {
+            format!("  ({branch})")
+        };
+        let state = match run_state(root, &branch) {
+            s if s.is_empty() => String::new(),
+            s => format!("  [{s}]"),
+        };
+        println!("  {}  {:<28}{extra}{state}", i + 1, n);
     }
-    let answer = ask("stack> ")?;
+    let answer = ask("stack> ").context("no stack chosen")?;
     if let Ok(n) = answer.parse::<usize>() {
         if n >= 1 && n <= names.len() {
             return resolve_target(root, st, names[n - 1]);
@@ -840,18 +915,93 @@ fn running_pid(root: &std::path::Path, branch: &str) -> Option<u32> {
         .then_some(pid)
 }
 
-/// Does claude have a stored conversation for this directory?
-fn claude_has_session(dir: &str) -> bool {
+/// The id of claude's most recent conversation for this directory, if any.
+///
+/// Resuming by id beats `--continue`: it says in the log which conversation was
+/// picked, and does not depend on how claude decides what "most recent" means.
+fn claude_last_session(dir: &str) -> Option<String> {
     let enc: String = dir
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let Ok(home) = std::env::var("HOME") else {
-        return false;
-    };
-    std::fs::read_dir(format!("{home}/.claude/projects/{enc}"))
-        .map(|mut d| d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "jsonl"))))
-        .unwrap_or(false)
+    let home = std::env::var("HOME").ok()?;
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(format!("{home}/.claude/projects/{enc}")).ok()? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|x| x != "jsonl") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let when = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(t, _)| when > *t) {
+            newest = Some((when, id.to_string()));
+        }
+    }
+    newest.map(|(_, id)| id)
+}
+
+/// The last step header a run wrote, as "2/9 apply-copilot-review".
+fn last_step(root: &std::path::Path, branch: &str) -> Option<String> {
+    let path = log_path(root, branch).ok()?;
+    let text = read_tail(&path, 64 * 1024)?;
+    let mut found = None;
+    for line in text.lines() {
+        let t = line.trim_start_matches(['-', ' ']);
+        let Some(rest) = t.strip_prefix('[') else { continue };
+        let Some((counter, tail)) = rest.split_once(']') else { continue };
+        if !counter.contains('/') {
+            continue;
+        }
+        // Strip the rule and timestamp the header is padded with.
+        let label = tail.trim().trim_end_matches(|c: char| c == '-' || c.is_whitespace());
+        let label = label
+            .rsplit_once(' ')
+            .filter(|(_, t)| t.len() == 8 && t.contains(':'))
+            .map(|(l, _)| l)
+            .unwrap_or(label);
+        found = Some(format!("{counter} {}", label.trim().trim_end_matches('-').trim()));
+    }
+    found
+}
+
+/// Read at most `max` bytes from the end of a file.
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// One-line description of where a branch's run got to.
+fn run_state(root: &std::path::Path, branch: &str) -> String {
+    if running_pid(root, branch).is_some() {
+        return match last_step(root, branch) {
+            Some(step) => format!("running {step}"),
+            None => "running".into(),
+        };
+    }
+    match last_status(root, branch).as_deref() {
+        Some("ok") => "done".into(),
+        Some(other) => {
+            let short = other.strip_prefix("failed: ").unwrap_or(other);
+            format!("failed {}", short.split(" after ").next().unwrap_or(short))
+        }
+        None => match last_step(root, branch) {
+            Some(step) => format!("stopped at {step}"),
+            None => String::new(),
+        },
+    }
 }
 
 fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
@@ -1059,6 +1209,39 @@ fn start_detached(
     Ok(())
 }
 
+/// Add a label to the PR for `branch`.
+///
+/// `gh pr edit --add-label` still queries Projects (classic), which GitHub has
+/// deprecated, so it fails outright; the REST endpoint avoids that query.
+fn label_command(branch: &str, label: &str) -> String {
+    format!(
+        "set -e\n\
+         pr=$(gh pr list --head {branch} --json number --jq '.[0].number')\n\
+         gh api \"repos/{{owner}}/{{repo}}/issues/$pr/labels\" -f \"labels[]={label}\" --jq '[.[].name]'\n"
+    )
+}
+
+/// Wrap on whitespace for the run header.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.len() + 1 + word.len() > width {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
+}
+
 fn stack_names(st: &Stacks) -> String {
     if st.stacks.is_empty() {
         "(none)".into()
@@ -1157,7 +1340,7 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     }
     let task = match o.task {
         Some(t) => t,
-        None if needs_task => ask("Task: ")?,
+        None if needs_task => ask("Task: ").context("this pipeline needs a task")?,
         None => String::new(),
     };
 
@@ -1180,7 +1363,16 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
              branch first, e.g. `rigg new my-feature`, or pass --base <other-ref>."
         );
     }
-    println!("rigg: {} step(s) on {branch} (base {base})", steps.len());
+    let pipeline_name = o.pipeline.as_deref().unwrap_or("steps");
+    println!(
+        "rigg  {branch}  (base {base}, pipeline {pipeline_name}, {} steps)",
+        steps.len()
+    );
+    // The full task, not just the truncated echo in the first step's argv.
+    let task = vars.get("task").cloned().unwrap_or_default();
+    for (i, line) in wrap(task.trim(), 68).into_iter().enumerate() {
+        println!("{}  {line}", if i == 0 { "task" } else { "    " });
+    }
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run, o.headless);
     let outcome = runner.run(&steps);
     if !o.dry_run {
@@ -1291,6 +1483,100 @@ fn push_stack(
     println!("stack `{target}` is now {} deep", st.stacks[&target].len());
     println!("worktree at {path}");
     Ok(std::path::PathBuf::from(path))
+}
+
+/// Remove every branch of a stack, newest first.
+fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> Result<()> {
+    let mut st = Stacks::load(root)?;
+    let entries = st.stacks.get(name).cloned().unwrap_or_default();
+    let cfg = Config::load(root, None).unwrap_or_default();
+    let trunk = format!("origin/{}", cfg.stack.trunk);
+    let trunk = if util::git(root, &["rev-parse", "--verify", "--quiet", &trunk]).is_ok() {
+        trunk
+    } else {
+        cfg.stack.trunk.clone()
+    };
+
+    println!("stack `{name}`");
+    let mut blocked = Vec::new();
+    for e in entries.iter().rev() {
+        let dir = entry_path(root, e).ok();
+        let running = running_pid(root, &e.branch).is_some();
+        let dirty = dir
+            .as_deref()
+            .and_then(|d| util::git(std::path::Path::new(d), &["status", "--porcelain"]).ok())
+            .map(|o| o.lines().count())
+            .unwrap_or(0);
+        let unmerged = util::git(
+            root,
+            &["merge-base", "--is-ancestor", &format!("refs/heads/{}", e.branch), &trunk],
+        )
+        .is_err();
+
+        let mut notes = Vec::new();
+        if running {
+            notes.push("a run is going".to_string());
+        }
+        if dirty > 0 {
+            notes.push(format!("{dirty} uncommitted"));
+        }
+        if unmerged {
+            notes.push("not on the trunk".to_string());
+        }
+        if !notes.is_empty() && !force {
+            blocked.push(e.branch.clone());
+        }
+        println!(
+            "  {} {}{}",
+            if notes.is_empty() || force { "remove" } else { "KEEP  " },
+            e.branch,
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", notes.join(", "))
+            }
+        );
+    }
+
+    if !blocked.is_empty() {
+        println!(
+            "\n{} branch(es) hold work that is not on the trunk, uncommitted, or still \
+             running. Pass --force to remove them anyway.",
+            blocked.len()
+        );
+        return Ok(());
+    }
+    if !yes {
+        println!("\ndry run; pass --yes to remove");
+        return Ok(());
+    }
+
+    let ws = herdr::workspaces().unwrap_or_default();
+    // Newest first: a branch below is the base of the one above it.
+    for e in entries.iter().rev() {
+        if let Some(dir) = entry_path(root, e).ok() {
+            if let Some((id, _)) = ws.iter().find(|(_, p)| p == &dir) {
+                let _ = herdr::workspace_close(id);
+            }
+            let mut args = vec!["worktree", "remove", &dir];
+            if force {
+                args.push("--force");
+            }
+            if let Err(err) = util::git(root, &args) {
+                println!("  could not remove {}: {err}", e.branch);
+                continue;
+            }
+        }
+        let flag = if force { "-D" } else { "-d" };
+        match util::git(root, &["branch", flag, &e.branch]) {
+            Ok(_) => println!("  removed {}", e.branch),
+            Err(err) => println!("  removed {} (branch kept: {err})", e.branch),
+        }
+    }
+    st.stacks.remove(name);
+    st.save(root)?;
+    println!("\nstack `{name}` is gone");
+    Ok(())
 }
 
 /// Remove worktrees for branches already merged into the trunk.
@@ -1552,7 +1838,7 @@ fn ask(prompt: &str) -> Result<String> {
     std::io::stdin().read_line(&mut line)?;
     let line = line.trim().to_string();
     if line.is_empty() {
-        bail!("no task given");
+        bail!("nothing entered");
     }
     Ok(line)
 }
@@ -1609,4 +1895,22 @@ fn which(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn label_command_is_valid_shell() {
+        let cmd = super::label_command("my-branch", "preview");
+        assert!(cmd.contains("issues/$pr/labels"), "{cmd}");
+        // gh's {owner}/{repo} placeholders must survive verbatim.
+        assert!(cmd.contains("repos/{owner}/{repo}"), "{cmd}");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .expect("sh");
+        assert!(out.status.success(), "invalid shell: {cmd}");
+    }
 }
