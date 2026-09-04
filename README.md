@@ -107,6 +107,9 @@ loaded in the current shell.
 
 Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
 
+`say --push` commits and pushes whatever the turn changed, using the request as
+the commit subject, so a follow-up reaches the PR without a second command.
+
 `say` with no arguments picks a stack and then asks what to send, the same shape
 as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
 that is still running, has uncommitted work, or holds commits that are not on

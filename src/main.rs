@@ -102,6 +102,9 @@ enum Cmd {
         /// Agent role (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
+        /// Commit and push whatever the turn changed, so it reaches the PR.
+        #[arg(long)]
+        push: bool,
     },
     /// Run the pipeline.
     Run {
@@ -667,6 +670,7 @@ fn real_main() -> Result<()> {
             target,
             message,
             agent,
+            push,
         } => {
             let st = Stacks::load(&root)?;
             let (entry, message) = match (target, message) {
@@ -696,13 +700,18 @@ fn real_main() -> Result<()> {
             let mut vars = BTreeMap::new();
             vars.insert("branch".into(), entry.branch.clone());
             vars.insert("repo".into(), dir.to_string_lossy().to_string());
+            let message_for_commit = message.clone();
             let step = config::Step {
                 id: "say".into(),
                 agent: Some(role),
                 prompt: Some(message),
                 ..Default::default()
             };
-            pipeline::Runner::new(dir, cfg, vars, false, false).run(&[step])?;
+            pipeline::Runner::new(dir.clone(), cfg, vars, false, false).run(&[step])?;
+
+            if push {
+                push_changes(&dir, &entry.branch, &message_for_commit)?;
+            }
         }
 
         Cmd::Stack { cmd } => match cmd {
@@ -1490,6 +1499,30 @@ fn push_stack(
     println!("stack `{target}` is now {} deep", st.stacks[&target].len());
     println!("worktree at {path}");
     Ok(std::path::PathBuf::from(path))
+}
+
+/// Commit and push whatever a turn left behind, so it reaches the PR.
+fn push_changes(dir: &std::path::Path, branch: &str, message: &str) -> Result<()> {
+    let changed = util::git(dir, &["status", "--porcelain"])?;
+    if changed.trim().is_empty() {
+        println!("nothing changed, so nothing to push");
+        return Ok(());
+    }
+    // The request makes a better commit subject than anything generic.
+    let subject: String = message
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("follow-up")
+        .trim()
+        .chars()
+        .take(72)
+        .collect();
+    println!("committing {} change(s)", changed.lines().count());
+    util::git(dir, &["add", "-A"])?;
+    util::git(dir, &["commit", "-m", &subject])?;
+    util::git(dir, &["push", "-u", "origin", branch])?;
+    println!("pushed {branch}");
+    Ok(())
 }
 
 /// Remove every branch of a stack, newest first.
