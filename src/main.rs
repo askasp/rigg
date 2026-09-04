@@ -623,13 +623,21 @@ fn real_main() -> Result<()> {
                 .kind
                 .clone();
 
-            // Resuming only makes sense if there is something to resume.
-            let resumable = kind != "claude" || claude_has_session(&dir);
             println!("{} in {dir}", entry.branch);
             let mut cmd = std::process::Command::new(&kind);
             cmd.current_dir(&dir);
-            if !new && resumable {
-                cmd.arg("--continue");
+            if !new {
+                match (kind.as_str(), claude_last_session(&dir)) {
+                    // Name the conversation, so it is obvious which one opened.
+                    ("claude", Some(id)) => {
+                        println!("resuming session {id}");
+                        cmd.arg("--resume").arg(id);
+                    }
+                    ("claude", None) => println!("no previous session here; starting fresh"),
+                    _ => {
+                        cmd.arg("--continue");
+                    }
+                }
             }
             // Hand the terminal over: rigg has nothing left to do.
             let err = cmd.exec();
@@ -863,18 +871,35 @@ fn running_pid(root: &std::path::Path, branch: &str) -> Option<u32> {
         .then_some(pid)
 }
 
-/// Does claude have a stored conversation for this directory?
-fn claude_has_session(dir: &str) -> bool {
+/// The id of claude's most recent conversation for this directory, if any.
+///
+/// Resuming by id beats `--continue`: it says in the log which conversation was
+/// picked, and does not depend on how claude decides what "most recent" means.
+fn claude_last_session(dir: &str) -> Option<String> {
     let enc: String = dir
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let Ok(home) = std::env::var("HOME") else {
-        return false;
-    };
-    std::fs::read_dir(format!("{home}/.claude/projects/{enc}"))
-        .map(|mut d| d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "jsonl"))))
-        .unwrap_or(false)
+    let home = std::env::var("HOME").ok()?;
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(format!("{home}/.claude/projects/{enc}")).ok()? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|x| x != "jsonl") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let when = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(t, _)| when > *t) {
+            newest = Some((when, id.to_string()));
+        }
+    }
+    newest.map(|(_, id)| id)
 }
 
 /// The last step header a run wrote, as "2/9 apply-copilot-review".

@@ -71,6 +71,10 @@ for as long as it runs, and claude will not resume one another process still has
 open. Use `rigg logs -f` to watch, `--wait` to open the session the moment the
 run finishes, or `--force` to start a second session alongside it. Stacks
 with a run in flight are marked `[running]` by `rigg stack list`.
+It resumes by session id and prints which one, rather than relying on
+`--continue`, and says plainly when a checkout has no previous session instead
+of leaving claude to report that it found nothing.
+
 `--new` starts a fresh session instead, `--path` only prints the directory, and
 under herdr it focuses the existing workspace rather than starting a second
 agent on the same checkout.
