@@ -44,13 +44,20 @@ addressed **by stack name**, so it works from any directory:
 
 ```sh
 rigg new billing "Add proration to subscription changes"
+rigg new "Add proration to subscription changes"   # name generated for you
 rigg quick new billing "..."      # use the pipeline named `quick`
 rigg add billing "Expose it in the API"   # next branch, auto-named billing-2
 rigg say billing "also handle refunds"    # another turn in that stack's session
 rigg attach billing               # open claude/opencode on that stack's session
 rigg attach --path billing        # just the path: cd "$(rigg attach --path billing)"
+rigg logs billing -f              # follow a run
 rigg stack names                  # for shell completion
 ```
+
+`new` and `add` return the terminal immediately and run the pipeline detached,
+logging to `.git/rigg/logs/<branch>.log`; pass `--fg` to run in the terminal
+instead. Given a single argument that reads like a sentence, `new` treats it as
+the task and generates a stack name.
 
 `new` starts a stack; `add` appends the next branch to one and runs the pipeline
 there; `say` continues the agent session in that stack's tip rather than running

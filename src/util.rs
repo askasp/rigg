@@ -54,6 +54,43 @@ pub fn changed_files(root: &std::path::Path, base: &str) -> Result<Vec<String>> 
     Ok(files)
 }
 
+/// rigg's per-repository state directory, inside the shared git dir.
+pub fn state_dir(root: &std::path::Path) -> Result<PathBuf> {
+    let common = git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    Ok(PathBuf::from(common).join("rigg"))
+}
+
+/// A readable random branch name, for when none was given.
+pub fn random_name() -> String {
+    const ADJ: [&str; 16] = [
+        "swift", "quiet", "brave", "silver", "rapid", "calm", "lucky", "green",
+        "amber", "clear", "bold", "warm", "keen", "still", "bright", "plain",
+    ];
+    const NOUN: [&str; 16] = [
+        "harbor", "meadow", "forest", "river", "stone", "field", "cloud", "valley",
+        "ridge", "delta", "grove", "beacon", "anchor", "summit", "hollow", "quarry",
+    ];
+    // /dev/urandom never reaches EOF, so take a fixed number of bytes.
+    let mut r = [0u8; 4];
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut r))
+        .is_ok();
+    if !ok {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        r = n.to_le_bytes();
+    }
+    format!(
+        "{}-{}-{:02x}{:02x}",
+        ADJ[r[0] as usize % ADJ.len()],
+        NOUN[r[1] as usize % NOUN.len()],
+        r[2],
+        r[3]
+    )
+}
+
 /// Create a worktree with plain git, for setups with no herdr.
 pub fn git_worktree_add(
     main: &std::path::Path,
@@ -192,4 +229,14 @@ pub fn shell(dir: &std::path::Path, cmd: &str) -> Result<()> {
         bail!("command failed (exit {}): {cmd}", status.code().unwrap_or(-1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn random_name_is_bounded_and_shaped() {
+        let n = super::random_name();
+        assert_eq!(n.matches('-').count(), 2, "{n}");
+        assert!(n.len() < 32, "{n}");
+    }
 }

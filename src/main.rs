@@ -36,8 +36,9 @@ enum Cmd {
     },
     /// Start a new stack and run a pipeline on it in one go.
     New {
-        /// Branch and stack name.
-        name: String,
+        /// Stack name. If this is the only argument and reads like a sentence
+        /// it is taken as the task, and a name is generated.
+        name: Option<String>,
         /// The task. Prompted for if omitted.
         prompt: Option<String>,
         #[arg(long)]
@@ -46,6 +47,9 @@ enum Cmd {
         base: Option<String>,
         #[arg(long)]
         headless: bool,
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        fg: bool,
     },
     /// Append the next branch to a stack and run a pipeline on it.
     Add {
@@ -60,6 +64,9 @@ enum Cmd {
         branch: Option<String>,
         #[arg(long)]
         headless: bool,
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        fg: bool,
     },
     /// Open an interactive agent on a stack, resuming its session.
     Attach {
@@ -107,6 +114,14 @@ enum Cmd {
         /// Drive every agent step headlessly, whatever the config says.
         #[arg(long)]
         headless: bool,
+    },
+    /// Show a run's log.
+    Logs {
+        /// Stack or branch name.
+        target: String,
+        /// Follow the log as it grows.
+        #[arg(short, long)]
+        follow: bool,
     },
     /// Show agents, branch, and stack state.
     Status,
@@ -256,13 +271,30 @@ fn real_main() -> Result<()> {
             RunOpts { pipeline, task, base, from, only, dry_run, headless },
         )?,
 
-        Cmd::New { name, prompt, pipeline, base, headless } => {
+        Cmd::New {
+            name,
+            prompt,
+            pipeline,
+            base,
+            headless,
+            fg,
+        } => {
+            // A lone argument that reads like a sentence is the task, not a name.
+            let (name, prompt) = match (name, prompt) {
+                (Some(n), Some(p)) => (n, Some(p)),
+                (Some(one), None) if one.trim().contains(char::is_whitespace) => {
+                    (util::random_name(), Some(one))
+                }
+                (Some(n), None) => (n, None),
+                (None, p) => (util::random_name(), p),
+            };
             let path = push_stack(&root, cli.config.as_deref(), &name, base, None, true)?;
-            execute(
-                &path,
-                None,
-                RunOpts { pipeline, task: prompt, headless, ..Default::default() },
-            )?;
+            let opts = RunOpts { pipeline, task: prompt, headless, ..Default::default() };
+            if fg {
+                execute(&path, None, opts)?;
+            } else {
+                start_detached(&root, &path, &name, opts)?;
+            }
         }
 
         Cmd::Add {
@@ -271,6 +303,7 @@ fn real_main() -> Result<()> {
             pipeline,
             branch,
             headless,
+            fg,
         } => {
             let st = Stacks::load(&root)?;
             if !st.stacks.contains_key(&stack) {
@@ -290,11 +323,31 @@ fn real_main() -> Result<()> {
                 Some(stack),
                 false,
             )?;
-            execute(
-                &path,
-                None,
-                RunOpts { pipeline, task: prompt, headless, ..Default::default() },
-            )?;
+            let opts = RunOpts { pipeline, task: prompt, headless, ..Default::default() };
+            if fg {
+                execute(&path, None, opts)?;
+            } else {
+                start_detached(&root, &path, &branch, opts)?;
+            }
+        }
+
+        Cmd::Logs { target, follow } => {
+            let st = Stacks::load(&root)?;
+            let branch = resolve_target(&st, &target)
+                .map(|e| e.branch)
+                .unwrap_or(target);
+            let log = log_path(&root, &branch)?;
+            if !log.exists() {
+                bail!("no log for `{branch}` at {}", log.display());
+            }
+            if follow {
+                let err = std::process::Command::new("tail")
+                    .arg("-f")
+                    .arg(&log)
+                    .exec();
+                bail!("could not tail {}: {err}", log.display());
+            }
+            print!("{}", std::fs::read_to_string(&log)?);
         }
 
         Cmd::Attach {
@@ -480,6 +533,65 @@ fn shellexpand_home(p: &str) -> String {
         },
         None => p.to_string(),
     }
+}
+
+fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
+    Ok(util::state_dir(root)?
+        .join("logs")
+        .join(format!("{}.log", branch.replace('/', "-"))))
+}
+
+/// Run the pipeline in the background so the terminal comes straight back.
+fn start_detached(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    branch: &str,
+    o: RunOpts,
+) -> Result<()> {
+    let log = log_path(root, branch)?;
+    if let Some(p) = log.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let out = std::fs::File::create(&log)?;
+    let errs = out.try_clone()?;
+
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = vec!["run".into()];
+    if let Some(p) = &o.pipeline {
+        args.push("--pipeline".into());
+        args.push(p.clone());
+    }
+    if let Some(t) = &o.task {
+        args.push("--task".into());
+        args.push(t.clone());
+    }
+    if o.headless {
+        args.push("--headless".into());
+    }
+
+    // setsid detaches from this terminal's session, so the run survives the
+    // shell going away.
+    let mut cmd = if which("setsid") {
+        let mut c = std::process::Command::new("setsid");
+        c.arg(&exe).args(&args);
+        c
+    } else {
+        let mut c = std::process::Command::new(&exe);
+        c.args(&args);
+        c
+    };
+    let child = cmd
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(errs)
+        .spawn()
+        .context("could not start the pipeline in the background")?;
+
+    println!("started `{branch}` in the background (pid {})", child.id());
+    println!("  rigg logs {branch} -f");
+    println!("  rigg attach {branch}");
+    Ok(())
 }
 
 fn stack_names(st: &Stacks) -> String {

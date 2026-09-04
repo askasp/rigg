@@ -15,7 +15,8 @@ _rigg() {
     'new:Start a new stack and run a pipeline on it'
     'add:Append the next branch to a stack'
     'say:Send a follow-up prompt to a stack'
-    'attach:Print where a stack lives'
+    'attach:Open an agent on a stack'
+    'logs:Show a run log'
     'run:Run the pipeline here'
     'status:Show branch and stack state'
     'doctor:Check the environment'
@@ -27,7 +28,7 @@ _rigg() {
     return
   fi
   case "${words[2]}" in
-    add|say|attach) (( CURRENT == 3 )) && _rigg_stacks ;;
+    add|say|attach|logs) (( CURRENT == 3 )) && _rigg_stacks ;;
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr ;;
   esac
 }
