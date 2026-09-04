@@ -169,10 +169,20 @@ impl Config {
     }
 
     pub fn load(root: &Path, explicit: Option<&str>) -> Result<Self> {
-        let path = match explicit {
+        let mut path = match explicit {
             Some(p) => PathBuf::from(p),
             None => Self::path_for(root),
         };
+        // A worktree checked out before rigg.toml was committed will not have
+        // one, so fall back to the primary checkout's config.
+        if !path.exists() && explicit.is_none() {
+            if let Ok(main) = crate::util::main_checkout(root) {
+                let alt = main.join("rigg.toml");
+                if alt.exists() {
+                    path = alt;
+                }
+            }
+        }
         if !path.exists() {
             bail!(
                 "no config at {}. Run `rigg init` to create one.",
