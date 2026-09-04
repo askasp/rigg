@@ -117,18 +117,36 @@ I'll read the file first.
   · Edit calc.py
 ```
 
-### Queueing the next branch
+### Queueing a stack
 
-The next branch is cut from the tip's last commit, so it cannot be created while
-a run is still working on that tip. `rigg add` says so, and `--wait` queues:
+`rigg add` returns immediately and queues, so a stack can be filled in one go
+and left to run - each branch its own small PR:
 
 ```sh
-rigg add billing "Expose it in the API" --wait
+rigg new billing   "Add proration to subscription changes"
+rigg add billing   "Expose it in the API"
+rigg add billing   "Show it in the invoice view"
 ```
 
-It waits for the tip's run to finish - which, with a pipeline that opens the PR,
-means the PR is up - then branches from the result and starts the next task
-detached.
+```
+billing
+  1. billing   <- main      [running]
+  2. billing-2 <- billing   [running]
+  3. billing-3 <- billing-2 [running]
+```
+
+There is no daemon. Each `add` reserves its entry in `stack.json`, writes a pid
+file, and detaches a worker under `setsid` that polls until the run on its base
+finishes; then it creates the worktree from that base's final commit and runs
+the pipeline. So the queue is a chain of waiters, each watching the one below.
+
+A worker refuses to branch when its base's run did not succeed, or left work
+uncommitted - either way the new branch would not contain what it should. Runs
+record their outcome in `.git/rigg/run/<branch>.status`.
+
+Everything lives in `.git/rigg/`: `stack.json`, `logs/<branch>.log`,
+`run/<branch>.pid` and `run/<branch>.status`. Queued workers do not survive a
+reboot; re-run `rigg add` for anything that was still waiting.
 
 ### Stacking needs commits
 
