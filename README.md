@@ -70,7 +70,28 @@ agent on the same checkout.
 A stack name resolves to its tip, and a branch name to itself, so both
 `rigg say billing` and `rigg say billing-2` work.
 
-Shell completion for stack names lives in `completions/_rigg` (zsh).
+### Shell integration
+
+`completions/_rigg` completes stack names (zsh). `rigg.zsh` adds aliases and
+keybindings - source it from `~/.zshrc`:
+
+```sh
+source /path/to/rigg/rigg.zsh
+```
+
+| key | does |
+| --- | --- |
+| `^X n` | `rigg new ""` with the cursor inside the quotes |
+| `^X m` | `rigg say ""`, likewise |
+| `^X a` | attach to a stack |
+| `^X l` | follow a run's log |
+| `^X s` | list stacks, keeping what you were typing |
+
+Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`.
+
+Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
+when there is only one, through fzf when it is installed, otherwise from a
+numbered list. `attach` prefers the stack you are standing in.
 
 ### Stacking needs commits
 
@@ -100,7 +121,9 @@ named after the branch. `--base` always means "root a new stack here". So
 running it twice from the trunk gives two independent stacks rather than
 accidentally piling the second onto the first.
 
-`stack prune` only touches a worktree whose branch is an ancestor of the trunk
+`stack prune` deletes the merged branches along with their checkouts, since
+`git branch -d` refuses anything not actually merged; pass `--keep-branches` to
+keep them. It only touches a worktree whose branch is an ancestor of the trunk
 (`origin/<trunk>`, else `<trunk>`), whose checkout is clean, and which is either
 owned by a herdr workspace it can close first or is not any process's working
 directory. The main checkout and the worktree you run it from are never

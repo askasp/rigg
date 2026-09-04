@@ -84,9 +84,11 @@ enum Cmd {
     },
     /// Send a follow-up prompt to a stack's agent session.
     Say {
-        /// Stack or branch to talk to.
+        /// Stack or branch to talk to. Omit to choose.
         target: String,
-        message: String,
+        /// The message. If `target` is the only argument and reads like a
+        /// sentence, it is taken as the message and the stack is chosen.
+        message: Option<String>,
         /// Agent role (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
@@ -117,8 +119,8 @@ enum Cmd {
     },
     /// Show a run's log.
     Logs {
-        /// Stack or branch name.
-        target: String,
+        /// Stack or branch name. Omit to choose.
+        target: Option<String>,
         /// Follow the log as it grows.
         #[arg(short, long)]
         follow: bool,
@@ -167,6 +169,9 @@ enum StackCmd {
         /// Actually remove them. Without this it only lists candidates.
         #[arg(long)]
         yes: bool,
+        /// Keep the branches; only remove the checkouts.
+        #[arg(long)]
+        keep_branches: bool,
     },
     /// Open a PR for a stack entry against its own base.
     Pr {
@@ -333,9 +338,10 @@ fn real_main() -> Result<()> {
 
         Cmd::Logs { target, follow } => {
             let st = Stacks::load(&root)?;
-            let branch = resolve_target(&st, &target)
-                .map(|e| e.branch)
-                .unwrap_or(target);
+            let branch = match target {
+                Some(t) => resolve_target(&st, &t).map(|e| e.branch).unwrap_or(t),
+                None => pick_stack(&st)?.branch,
+            };
             let log = log_path(&root, &branch)?;
             if !log.exists() {
                 bail!("no log for `{branch}` at {}", log.display());
@@ -359,7 +365,14 @@ fn real_main() -> Result<()> {
             let st = Stacks::load(&root)?;
             let entry = match target {
                 Some(t) => resolve_target(&st, &t)?,
-                None => resolve_target(&st, &util::current_branch(&root)?)?,
+                // No target: prefer the stack we are standing in, else choose.
+                None => match util::current_branch(&root)
+                    .ok()
+                    .and_then(|b| resolve_target(&st, &b).ok())
+                {
+                    Some(e) => e,
+                    None => pick_stack(&st)?,
+                },
             };
             let dir = entry_path(&root, &entry)?;
             if path_only {
@@ -413,7 +426,10 @@ fn real_main() -> Result<()> {
             agent,
         } => {
             let st = Stacks::load(&root)?;
-            let entry = resolve_target(&st, &target)?;
+            let (entry, message) = match message {
+                Some(m) => (resolve_target(&st, &target)?, m),
+                None => (pick_stack(&st)?, target),
+            };
             let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
             let cfg = Config::load(&dir, None)?;
             let role = match agent {
@@ -450,7 +466,11 @@ fn real_main() -> Result<()> {
                     println!("{name}");
                 }
             }
-            StackCmd::Prune { base, yes } => prune(&root, cli.config.as_deref(), base, yes)?,
+            StackCmd::Prune {
+                base,
+                yes,
+                keep_branches,
+            } => prune(&root, cli.config.as_deref(), base, yes, keep_branches)?,
             StackCmd::List => {
                 let st = Stacks::load(&root)?;
                 if st.stacks.is_empty() {
@@ -533,6 +553,51 @@ fn shellexpand_home(p: &str) -> String {
         },
         None => p.to_string(),
     }
+}
+
+/// Choose a stack interactively: one stack needs no choosing, fzf is used when
+/// present, otherwise a numbered list.
+fn pick_stack(st: &Stacks) -> Result<Entry> {
+    if st.stacks.is_empty() {
+        bail!("no stacks; start one with `rigg new \"<task>\"`");
+    }
+    let names: Vec<&String> = st.stacks.keys().collect();
+    if names.len() == 1 {
+        return resolve_target(st, names[0]);
+    }
+
+    if which("fzf") {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("fzf")
+            .arg("--prompt=stack> ")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            for n in &names {
+                writeln!(stdin, "{n}")?;
+            }
+        }
+        let out = child.wait_with_output()?;
+        let choice = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if choice.is_empty() {
+            bail!("nothing selected");
+        }
+        return resolve_target(st, &choice);
+    }
+
+    for (i, n) in names.iter().enumerate() {
+        let tip = st.tip_of(n).map(|e| e.branch.clone()).unwrap_or_default();
+        let extra = if &tip == *n { String::new() } else { format!("  (tip {tip})") };
+        println!("  {}  {n}{extra}", i + 1);
+    }
+    let answer = ask("stack> ")?;
+    if let Ok(n) = answer.parse::<usize>() {
+        if n >= 1 && n <= names.len() {
+            return resolve_target(st, names[n - 1]);
+        }
+    }
+    resolve_target(st, &answer)
 }
 
 fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
@@ -761,6 +826,14 @@ fn push_stack(
     }
 
     let from = util::main_checkout(root)?;
+    if util::git(&from, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .is_ok()
+    {
+        bail!(
+            "branch `{branch}` already exists. Pick another name, or delete it with \
+             `git branch -d {branch}` if it is finished."
+        );
+    }
     // Herdr gives the worktree its own workspace; without it (or in a headless
     // setup) plain git is enough and keeps rigg usable on its own.
     let use_herdr = cfg.backend != Backend::Headless && herdr::inside_session();
@@ -795,6 +868,7 @@ fn prune(
     cfg_path: Option<&str>,
     base: Option<String>,
     yes: bool,
+    keep_branches: bool,
 ) -> Result<()> {
     let cfg = Config::load(root, cfg_path).unwrap_or_default();
     let trunk = cfg.stack.trunk.clone();
@@ -880,6 +954,11 @@ fn prune(
         match util::git(root, &["worktree", "remove", p]) {
             Ok(_) => {
                 removed += 1;
+                // The branch is an ancestor of the trunk, so `-d` is safe: it
+                // refuses anything not actually merged.
+                if !keep_branches {
+                    let _ = util::git(root, &["branch", "-d", b]);
+                }
                 println!("removed {b}");
             }
             Err(e) => {
