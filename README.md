@@ -165,9 +165,9 @@ rigg add billing   "Show it in the invoice view"
 
 ```
 billing
-  1. billing   <- main      [running]
-  2. billing-2 <- billing   [running]
-  3. billing-3 <- billing-2 [running]
+  1. billing   <- main      [running 3/9 apply-review]
+  2. billing-2 <- billing   [queued behind billing]
+  3. billing-3 <- billing-2 [queued behind billing-2]
 ```
 
 There is no daemon. Each `add` reserves its entry in `stack.json`, writes a pid

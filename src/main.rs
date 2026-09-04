@@ -300,6 +300,18 @@ fn rewrite_pipeline_prefix(mut argv: Vec<String>) -> Vec<String> {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE, so `rigg stack list | head` panics on a broken pipe
+    // instead of just stopping. Restore the default disposition.
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn signal(sig: i32, handler: usize) -> usize;
+        }
+        const SIGPIPE: i32 = 13;
+        const SIG_DFL: usize = 0;
+        signal(SIGPIPE, SIG_DFL);
+    }
+
     if let Err(e) = real_main() {
         eprintln!("rigg: {e:#}");
         std::process::exit(1);
@@ -382,7 +394,7 @@ fn real_main() -> Result<()> {
                     for (i, e) in entries.iter().enumerate() {
                         let marker = if e.branch == branch { "*" } else { " " };
                         let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
-                        let mut state = run_state(&root, &e.branch);
+                        let mut state = run_state(&root, e);
                         if state.is_empty() && entry_path(&root, e).is_err() {
                             state = "worktree gone".into();
                         }
@@ -781,7 +793,7 @@ fn real_main() -> Result<()> {
                     for (i, e) in entries.iter().enumerate() {
                         let mark = if e.branch == here { "*" } else { " " };
                         let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
-                        let mut state = run_state(&root, &e.branch);
+                        let mut state = run_state(&root, e);
                         if state.is_empty() && entry_path(&root, e).is_err() {
                             state = "worktree gone".into();
                         }
@@ -901,9 +913,9 @@ fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
         } else {
             format!("  ({branch})")
         };
-        let state = match run_state(root, &branch) {
-            s if s.is_empty() => String::new(),
-            s => format!("  [{s}]"),
+        let state = match target.as_ref().map(|e| run_state(root, e)) {
+            Some(s) if !s.is_empty() => format!("  [{s}]"),
+            _ => String::new(),
         };
         println!("  {}  {:<28}{extra}{state}", i + 1, n);
     }
@@ -1023,9 +1035,16 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).to_string())
 }
 
-/// One-line description of where a branch's run got to.
-fn run_state(root: &std::path::Path, branch: &str) -> String {
+/// One-line description of where a stack entry's run got to.
+fn run_state(root: &std::path::Path, e: &Entry) -> String {
+    let branch = &e.branch;
     if running_pid(root, branch).is_some() {
+        // A queued worker is alive but only polling; it makes its worktree
+        // once the branch below it finishes, so the absence of one says it has
+        // not started.
+        if entry_path(root, e).is_err() {
+            return format!("queued behind {}", e.base);
+        }
         return match last_step(root, branch) {
             Some(step) => format!("running {step}"),
             None => "running".into(),
