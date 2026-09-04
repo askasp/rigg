@@ -37,6 +37,10 @@ pub struct Config {
     /// Additional named pipelines, selected with `rigg <name> new ...`.
     #[serde(default)]
     pub pipelines: BTreeMap<String, Pipeline>,
+    /// Which pipeline runs when none is named. Defaults to the top-level
+    /// `[[steps]]`; set it to run one of `[pipelines]` instead.
+    #[serde(default)]
+    pub default_pipeline: Option<String>,
     #[serde(default)]
     pub stack: StackCfg,
     /// Directory the config was loaded from; `prompt_file` paths resolve
@@ -245,6 +249,9 @@ impl Config {
 
     /// Steps for a pipeline by name, or the default pipeline.
     pub fn steps_for(&self, name: Option<&str>) -> Result<Vec<Step>> {
+        // An explicit choice wins, then `default_pipeline`, then the top-level
+        // steps.
+        let name = name.or(self.default_pipeline.as_deref());
         match name {
             None => Ok(self.steps.clone()),
             Some(n) => self
@@ -263,6 +270,15 @@ impl Config {
 
 
     fn validate(&self) -> Result<()> {
+        if let Some(d) = &self.default_pipeline {
+            if !self.pipelines.contains_key(d) {
+                let known: Vec<&str> = self.pipelines.keys().map(|s| s.as_str()).collect();
+                bail!(
+                    "default_pipeline = \"{d}\" names no pipeline; known: {}",
+                    if known.is_empty() { "(none)".into() } else { known.join(", ") }
+                );
+            }
+        }
         let all = self
             .steps
             .iter()

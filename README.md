@@ -198,6 +198,20 @@ prompts to live:
   reviewer.md
 ```
 
+The pipeline that runs when none is named is the top-level `[[steps]]`. To make
+a named one the default instead:
+
+```toml
+default_pipeline = "quick"
+
+[[pipelines.quick.steps]]
+id = "implement"
+```
+
+`--pipeline <name>` and `rigg <name> new ...` still override it. Note that
+setting `default_pipeline` leaves the top-level `[[steps]]` with no way to be
+selected, so put every pipeline under `[pipelines]` if you use it.
+
 A step takes either an inline `prompt` or a `prompt_file` relative to the config
 directory - both get the same `{{task}}` / `{{branch}}` / `{{base}}` / `{{repo}}`
 substitution:
