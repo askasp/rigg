@@ -138,7 +138,15 @@ impl Runner {
     pub fn run_step(&mut self, step: &Step) -> Result<()> {
         if let Some(cmd) = &step.run {
             let cmd = util::render(cmd, &self.vars);
-            println!("  $ {cmd}");
+            // A multi-line script would otherwise dump its whole body into the
+            // log before running.
+            match cmd.lines().count() {
+                0 | 1 => println!("  $ {}", cmd.trim()),
+                n => println!(
+                    "  $ {}  ... ({n} lines)",
+                    cmd.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
+                ),
+            }
             if self.dry_run {
                 return Ok(());
             }
@@ -210,9 +218,15 @@ impl Runner {
 
     pub fn run(&mut self, steps: &[Step]) -> Result<()> {
         let total = steps.len();
+        let started = std::time::Instant::now();
         for (i, step) in steps.iter().enumerate() {
             let label = step.description.clone().unwrap_or_else(|| step.id.clone());
-            println!("\n[{}/{}] {} ({})", i + 1, total, label, step.id);
+            let head = format!("[{}/{}] {}", i + 1, total, label);
+            // A rule per step, so the boundaries stay findable once the agent
+            // output is streaming past.
+            println!("\n{:-<4} {head} {:-<width$} {}", "", "", clock(),
+                width = 64usize.saturating_sub(head.len()));
+            let step_started = std::time::Instant::now();
 
             if !self.should_run(step)? {
                 println!("  skipped: no matching changed files");
@@ -224,16 +238,21 @@ impl Runner {
             }
 
             match self.run_step(step) {
-                Ok(()) => println!("  ok"),
+                Ok(()) => println!("  ok ({})", elapsed(step_started)),
                 Err(e) if step.continue_on_error => {
-                    println!("  failed (continuing): {e}");
+                    println!("  failed after {} (continuing): {e}", elapsed(step_started));
                 }
                 Err(e) => {
                     herdr::notify(&format!("rigg: step `{}` failed", step.id));
-                    return Err(e.context(format!("step `{}` failed", step.id)));
+                    return Err(e.context(format!(
+                        "step `{}` failed after {}",
+                        step.id,
+                        elapsed(step_started)
+                    )));
                 }
             }
         }
+        println!("\ntotal {}", elapsed(started));
         Ok(())
     }
 }
@@ -250,6 +269,27 @@ fn describe(argv: &[String], prompt: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Local wall-clock time. Shelling out to `date` avoids a timezone dependency
+/// for what is only a log annotation.
+fn clock() -> String {
+    std::process::Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn elapsed(from: std::time::Instant) -> String {
+    let s = from.elapsed().as_secs();
+    if s >= 60 {
+        format!("{}m{:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
+    }
 }
 
 fn first_line(s: &str) -> String {

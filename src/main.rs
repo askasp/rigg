@@ -1059,6 +1059,27 @@ fn start_detached(
     Ok(())
 }
 
+/// Wrap on whitespace for the run header.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.len() + 1 + word.len() > width {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
+}
+
 fn stack_names(st: &Stacks) -> String {
     if st.stacks.is_empty() {
         "(none)".into()
@@ -1180,7 +1201,16 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
              branch first, e.g. `rigg new my-feature`, or pass --base <other-ref>."
         );
     }
-    println!("rigg: {} step(s) on {branch} (base {base})", steps.len());
+    let pipeline_name = o.pipeline.as_deref().unwrap_or("steps");
+    println!(
+        "rigg  {branch}  (base {base}, pipeline {pipeline_name}, {} steps)",
+        steps.len()
+    );
+    // The full task, not just the truncated echo in the first step's argv.
+    let task = vars.get("task").cloned().unwrap_or_default();
+    for (i, line) in wrap(task.trim(), 68).into_iter().enumerate() {
+        println!("{}  {line}", if i == 0 { "task" } else { "    " });
+    }
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run, o.headless);
     let outcome = runner.run(&steps);
     if !o.dry_run {

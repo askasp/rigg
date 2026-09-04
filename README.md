@@ -106,6 +106,25 @@ Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
 
+### Reading a log
+
+A run's log opens with the branch, the pipeline and the whole task, then rules
+off each step with a timestamp and reports how long it took:
+
+```
+rigg  billing  (base main, pipeline full, 9 steps)
+task  Add proration to subscription changes so a mid-cycle upgrade
+      bills the difference rather than the full period
+
+---- [1/9] implement ------------------------------------------- 20:34:44
+  -> [impl] claude -p --continue ...
+  · Edit backend/src/billing/proration.ts
+  ok (2m14s)
+```
+
+A multi-line `run` step shows its first line and a line count rather than its
+whole body.
+
 ### Watching a run
 
 `claude -p` prints nothing until its turn ends, which makes a long step look
