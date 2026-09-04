@@ -1058,6 +1058,13 @@ fn run_state(root: &std::path::Path, e: &Entry) -> String {
         }
         None => match last_step(root, branch) {
             Some(step) => format!("stopped at {step}"),
+            // No path was ever recorded, so this entry never got a worktree -
+            // usually because the branch below it failed and the worker
+            // refused to build on it.
+            None if e.path.is_none() => match last_status(root, &e.base) {
+                Some(st) if st != "ok" => format!("not started: `{}` failed", e.base),
+                _ => "not started".into(),
+            },
             None => String::new(),
         },
     }
