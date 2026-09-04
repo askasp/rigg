@@ -104,6 +104,19 @@ Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
 
+### Watching a run
+
+`claude -p` prints nothing until its turn ends, which makes a long step look
+hung. rigg runs it with `--output-format stream-json` instead and prints a line
+per event, so `rigg logs <stack> -f` shows the text and each tool call as they
+happen:
+
+```
+I'll read the file first.
+  · Read calc.py
+  · Edit calc.py
+```
+
 ### Stacking needs commits
 
 Each branch is cut from the previous branch's last commit, so a pipeline that
