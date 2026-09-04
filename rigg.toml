@@ -1,0 +1,60 @@
+# rigg pipeline
+# Steps run top to bottom. Start them with: rigg run --task "..."
+
+# How agent steps are driven. "herdr" prompts a live agent in a pane and waits
+# for its turn to settle; "headless" runs the agent's own non-interactive mode
+# once per step (claude -p, opencode run) and needs no herdr at all.
+# `rigg run --headless` forces headless for one run.
+backend = "herdr"
+
+[agents.impl]
+kind = "claude"
+autostart = true
+# backend = "headless"           # per-role override
+# command = ["my-agent", "--print", "{{prompt}}"]   # headless argv for an
+                                 # agent rigg has no built-in command for
+
+# A second model is the point of a Copilot-style review, without the round trip.
+# NOTE: as of opencode 1.18.27 herdr cannot submit prompts to opencode - the
+# text lands in the composer but Enter never fires. Until that is fixed, run the
+# reviewer on claude too, or point `kind` at another working agent.
+# [agents.reviewer]
+# kind = "opencode"
+# autostart = true
+
+[stack]
+trunk = "main"
+preview_label = "preview"
+frontend_paths = ["src/**/*.tsx", "src/**/*.css", "app/**"]
+
+[[steps]]
+id = "implement"
+agent = "impl"
+prompt = "{{task}}"
+# `until` defaults to herdr's own set (idle, done, blocked). Claude finishes a
+# turn in `done`, so do not pin this to `idle` - it will wait forever.
+
+[[steps]]
+id = "self-review"
+agent = "impl"
+clear = true                     # fresh context, as you do by hand
+prompt = "/code-review"
+# `clear` means the opposite thing per backend, because the underlying sessions
+# are opposite: herdr sends /clear to a session that would otherwise carry
+# context on, while headless steps resume the previous session (--continue)
+# unless `clear` tells them to start a new one.
+
+[[steps]]
+id = "test"
+run = "npm test"
+continue_on_error = true
+
+[[steps]]
+id = "apply-review"
+agent = "impl"
+prompt = "Address every finding from the review above. If a finding is wrong, say why instead."
+
+[[steps]]
+id = "push"
+run = "git push -u origin {{branch}}"
+confirm = true

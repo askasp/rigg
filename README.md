@@ -1,0 +1,174 @@
+# rigg
+
+Pipeline runner for AI coding agents, built on [Herdr](https://herdr.dev).
+
+You describe your repo's workflow once in `rigg.toml`; `rigg` drives the agents
+through it — prompting them, waiting for each turn to actually finish, running
+shell steps in between, and managing stacked branches.
+
+## Why Herdr rather than a shell script
+
+The hard part of this workflow is not ordering commands, it is knowing when an
+agent is *done*. Herdr tracks agent lifecycle state through integration hooks,
+so `herdr agent prompt <pane> "..." --wait` blocks until the turn genuinely
+settles instead of polling terminal output. `rigg` is a thin layer over that.
+
+Because Herdr owns the terminals, this works the same for Claude Code, opencode,
+Codex and the rest, and you can still watch and interrupt every step by hand.
+
+For unattended runs there is a second backend that skips Herdr entirely and
+drives the agents' own non-interactive modes — see [Backends](#backends).
+
+## Setup
+
+```sh
+cargo build --release
+herdr integration install claude      # required: enables accurate agent state
+herdr plugin link .                   # optional: adds "Rigg: run pipeline"
+rigg init                             # writes a starter rigg.toml
+rigg doctor                           # checks the whole chain
+```
+
+## Use
+
+```sh
+rigg run --task "Add rate limiting to the upload endpoint"
+rigg run --from self-review           # resume partway through
+rigg run --only test --dry-run        # see what would happen, touch nothing
+rigg run --headless --task "..."      # no herdr: claude -p / opencode run
+rigg status
+```
+
+The short form, which is how you will normally start work:
+
+```sh
+rigg new billing "Add proration to subscription changes"
+rigg quick new billing "..."   # run the pipeline named `quick` instead
+rigg add billing-2 "Now expose it in the API"   # next branch in the same stack
+rigg attach billing            # focus that branch's session
+rigg say "also handle the refund case"          # follow-up into the same session
+```
+
+`new` starts a stack and runs the pipeline on it; `add` appends to the stack you
+are standing in. `say` continues the existing agent session rather than starting
+a pipeline - one more turn in the conversation that is already going.
+
+Stacked PRs — each branch is a Herdr worktree rooted on the one below it, so
+every PR is reviewable on its own. Stacks are named, and several can sit on the
+trunk at once:
+
+```sh
+rigg stack push billing-1     # not in a stack: starts one, rooted on trunk
+rigg stack push billing-2     # run from the billing-1 worktree: continues it
+rigg stack push docs-1        # run from the trunk: starts a separate stack
+rigg stack push x --stack billing-1   # target a stack explicitly
+rigg stack push y --base main         # force a new stack rooted here
+rigg stack list               # every stack, current branch marked
+rigg stack pr                 # PR against its own base, labelled if frontend
+rigg stack prune              # dry run: worktrees whose branch already landed
+rigg stack prune --yes        # close their workspaces and remove the checkouts
+```
+
+`stack push` picks its target this way: an explicit `--stack` wins; otherwise it
+continues the stack holding the current branch; otherwise it starts a new stack
+named after the branch. `--base` always means "root a new stack here". So
+running it twice from the trunk gives two independent stacks rather than
+accidentally piling the second onto the first.
+
+`stack prune` only touches a worktree whose branch is an ancestor of the trunk
+(`origin/<trunk>`, else `<trunk>`), whose checkout is clean, and which is either
+owned by a herdr workspace it can close first or is not any process's working
+directory. The main checkout and the worktree you run it from are never
+candidates.
+
+## Config
+
+```toml
+[agents.impl]
+kind = "claude"        # herdr agent kind
+autostart = true       # split a pane and start it if not already running
+
+[[steps]]
+id = "implement"
+agent = "impl"
+prompt = "{{task}}"    # also {{branch}}, {{base}}, {{repo}}
+
+[[steps]]
+id = "self-review"
+agent = "impl"
+clear = true           # /clear first, so review runs on fresh context
+
+[[steps]]
+id = "test"
+run = "npm test"       # shell step
+continue_on_error = true
+```
+
+`capture = "name"` on a shell step stores its stdout as `{{name}}`, so a script's
+output can be fed straight into a later prompt - that is how PR review comments
+reach the agent.
+
+Other step keys: `until`, `timeout_ms`, `when_changed` (globs — used for
+frontend-only steps), `confirm`, `description`.
+
+## Backends
+
+```toml
+backend = "herdr"      # default; per-role override in [agents.<role>]
+```
+
+- **`herdr`** — prompt a long-lived agent in a pane and wait for the turn to
+  settle. Interactive: you watch it, and you can interrupt it.
+- **`headless`** — run the agent's own non-interactive mode once per step
+  (`claude -p "..."`, `opencode run "..."`) in the repo root, streaming its
+  output. Process exit *is* the end of the turn, so there is no state to wait
+  on and no Herdr, no session and no integration hooks are needed. `rigg run
+  --headless` forces it for one run; `rigg doctor --headless` checks it.
+
+**`clear` inverts between the two**, because the sessions are opposite. A Herdr
+session carries context forward on its own and `clear = true` wipes it with
+`/clear`. A headless invocation starts with nothing, so rigg resumes the
+previous one with `--continue`; `clear = true` is what leaves that flag off and
+starts a fresh session.
+
+`--continue` resumes the most recent session in the repo directory, so the
+first step of a headless run picks up where the last one left off — give it
+`clear = true` when a run should start clean.
+
+Unknown agent kinds get `<kind> "<prompt>"` and no resume flag. Give them a
+real command line instead:
+
+```toml
+[agents.reviewer]
+kind = "my-agent"
+command = ["my-agent", "--print", "{{prompt}}"]
+```
+
+A `command` is used verbatim — rigg adds no continue flag to it, so put one in
+the template if the tool has one. `until` and `timeout_ms` are Herdr-only.
+
+## Things worth knowing
+
+These were found the hard way while building this, and are encoded in the
+defaults:
+
+- **A headless agent needs a permission mode or it will edit nothing.** Run
+  unattended, `claude -p` describes the change it would make and stops. Give the
+  role `args = ["--permission-mode", "acceptEdits"]` (or `bypassPermissions` to
+  allow commands too). This does not apply in herdr mode, where the live session
+  already has its own permission setting.
+- **Claude finishes a turn in state `done`, not `idle`.** Waiting on `idle`
+  alone hangs forever. `until` is therefore unset by default, which makes Herdr
+  match its own set of `idle`, `done` and `blocked`.
+- **Slash commands are sent without `--wait`.** `/clear` settles instantly and
+  never enters a working state, so `--wait` would fail with
+  `agent_prompt_stalled` after 5s.
+- **rigg never targets its own pane.** An agent that starts a pipeline would
+  otherwise be handed its own prompts.
+- **opencode's TUI cannot currently be driven** (as of opencode 1.18.27): Herdr
+  delivers the prompt text into the composer but no synthetic key — `enter`,
+  `ctrl+m`, `return`, `ctrl+j`, a literal CR — submits it. Until that is fixed,
+  a second-model reviewer has to run on another agent kind — or on the headless
+  backend, where `opencode run` submits the prompt fine.
+- **`herdr pane run` re-parses its command through a shell**, so anything passed
+  to it needs quoting rather than argv splitting.

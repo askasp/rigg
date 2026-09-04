@@ -1,0 +1,17 @@
+id = "rigg"
+name = "Rigg"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Repo-defined agent pipelines and stacked PRs"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# Opens a pane in the focused workspace's directory and runs the pipeline
+# there, so the agent prompts stream where you can watch and interrupt them.
+[[actions]]
+id = "run"
+title = "Rigg: run pipeline"
+contexts = ["workspace"]
+command = ["target/release/rigg", "plugin-run"]
