@@ -117,6 +117,19 @@ I'll read the file first.
   · Edit calc.py
 ```
 
+### Queueing the next branch
+
+The next branch is cut from the tip's last commit, so it cannot be created while
+a run is still working on that tip. `rigg add` says so, and `--wait` queues:
+
+```sh
+rigg add billing "Expose it in the API" --wait
+```
+
+It waits for the tip's run to finish - which, with a pipeline that opens the PR,
+means the PR is up - then branches from the result and starts the next task
+detached.
+
 ### Stacking needs commits
 
 Each branch is cut from the previous branch's last commit, so a pipeline that

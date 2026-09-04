@@ -68,6 +68,9 @@ enum Cmd {
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
+        /// Wait for the run on the stack's tip to finish before branching.
+        #[arg(long)]
+        wait: bool,
     },
     /// Open an interactive agent on a stack, resuming its session.
     Attach {
@@ -415,6 +418,7 @@ fn real_main() -> Result<()> {
             branch,
             headless,
             fg,
+            wait,
         } => {
             let st = Stacks::load(&root)?;
             if !st.stacks.contains_key(&stack) {
@@ -423,6 +427,26 @@ fn real_main() -> Result<()> {
                      to start one.",
                     stack_names(&st)
                 );
+            }
+            // The new branch is cut from the tip's last commit, so a run still
+            // working on that tip has not produced what we would branch from.
+            if let Some(tip) = st.tip_of(&stack).map(|e| e.branch.clone()) {
+                if let Some(pid) = running_pid(&root, &tip) {
+                    if wait {
+                        println!("waiting for `{tip}` to finish (pid {pid})...");
+                        while running_pid(&root, &tip).is_some() {
+                            std::thread::sleep(std::time::Duration::from_secs(5));
+                        }
+                        println!("`{tip}` finished");
+                    } else {
+                        bail!(
+                            "`{tip}` is still running (pid {pid}), so its work is not \
+                             committed yet and the new branch would miss it.\n  \
+                             rigg add {stack} \"...\" --wait   queue this behind it\n  \
+                             rigg logs {tip} -f              watch it first"
+                        );
+                    }
+                }
             }
             let n = st.stacks[&stack].len() + 1;
             let branch = branch.unwrap_or_else(|| format!("{stack}-{n}"));
