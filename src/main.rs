@@ -54,8 +54,9 @@ enum Cmd {
     },
     /// Append the next branch to a stack and run a pipeline on it.
     Add {
-        /// Stack to extend. The new branch is named <stack>-<n>.
-        stack: String,
+        /// Stack to extend, or the task itself. Omit to choose from a list.
+        /// The new branch is named <stack>-<n>.
+        stack: Option<String>,
         /// The task. Prompted for if omitted.
         prompt: Option<String>,
         #[arg(long)]
@@ -214,8 +215,9 @@ enum StackCmd {
 
 /// Keybindings, and the zsh that installs them. Kept together so `rigg keys`
 /// can never describe bindings the shell does not actually have.
-const KEYS: [(&str, &str); 7] = [
-    ("^X n", "rigg new \"\"  - cursor inside the quotes"),
+const KEYS: [(&str, &str); 8] = [
+    ("^X n", "start a new stack: type the task"),
+    ("^X d", "add to a stack: pick it, then type"),
     ("^X m", "say something to a stack: pick it, then type"),
     ("^X a", "attach to a stack"),
     ("^X l", "follow a run's log"),
@@ -224,8 +226,9 @@ const KEYS: [(&str, &str); 7] = [
     ("^X ?", "show this table"),
 ];
 
-const ALIASES: [(&str, &str); 6] = [
+const ALIASES: [(&str, &str); 7] = [
     ("rn", "rigg new"),
+    ("rad", "rigg add"),
     ("ra", "rigg attach"),
     ("rl", "rigg logs"),
     ("rsay", "rigg say"),
@@ -238,14 +241,19 @@ export RIGG_ZSH=1
 
 alias rn='rigg new'
 alias ra='rigg attach'
+alias rad='rigg add'
 alias rl='rigg logs'
 alias rsay='rigg say'
 alias rs='rigg stack list'
 alias rrm='rigg stack rm'
 
-rigg-new-widget() { BUFFER='rigg new ""'; CURSOR=$(( ${#BUFFER} - 1 )); zle redisplay }
+rigg-new-widget() { BUFFER='rigg new'; zle accept-line }
 zle -N rigg-new-widget
 bindkey '^Xn' rigg-new-widget
+
+rigg-add-widget() { BUFFER='rigg add'; zle accept-line }
+zle -N rigg-add-widget
+bindkey '^Xd' rigg-add-widget
 
 rigg-say-widget() { BUFFER='rigg say'; zle accept-line }
 zle -N rigg-say-widget
@@ -432,6 +440,7 @@ fn real_main() -> Result<()> {
             headless,
             fg,
         } => {
+            let _ = &name;
             // A lone argument that reads like a sentence is the task, not a name.
             let (name, prompt) = match (name, prompt) {
                 (Some(n), Some(p)) => (n, Some(p)),
@@ -440,6 +449,11 @@ fn real_main() -> Result<()> {
                 }
                 (Some(n), None) => (n, None),
                 (None, p) => (util::random_name(), p),
+            };
+            let prompt = match prompt {
+                Some(p) => Some(p),
+                None if fg => None,
+                None => Some(ask("task> ").context("no task given")?),
             };
             let path = push_stack(&root, cli.config.as_deref(), &name, base, None, true)?;
             let opts = RunOpts { pipeline, task: prompt, headless, ..Default::default() };
@@ -460,13 +474,23 @@ fn real_main() -> Result<()> {
             worker,
         } => {
             let st = Stacks::load(&root)?;
-            if !st.stacks.contains_key(&stack) {
-                bail!(
-                    "no stack `{stack}`. Known stacks: {}. Use `rigg new {stack} \"...\"` \
-                     to start one.",
+            // A lone argument is the stack when it names one, otherwise the task.
+            let (stack, prompt) = match (stack, prompt) {
+                (Some(s), p) if st.stacks.contains_key(&s) => (s, p),
+                (Some(task), None) => (pick_stack_name(&root, &st)?, Some(task)),
+                (Some(s), Some(_)) => bail!(
+                    "no stack `{s}`. Known stacks: {}. Use `rigg new {s} \"...\"` to \
+                     start one.",
                     stack_names(&st)
-                );
-            }
+                ),
+                (None, p) => (pick_stack_name(&root, &st)?, p),
+            };
+            // A detached worker has no terminal to ask on, so settle the task here.
+            let prompt = match prompt {
+                Some(p) => Some(p),
+                None if fg => None,
+                None => Some(ask("task> ").context("no task given")?),
+            };
             let n = st.stacks[&stack].len() + 1;
             let branch = branch.unwrap_or_else(|| format!("{stack}-{n}"));
 
@@ -1256,6 +1280,14 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// Choose a stack and return its name.
+fn pick_stack_name(root: &std::path::Path, st: &Stacks) -> Result<String> {
+    let e = pick_stack(root, st)?;
+    st.stack_of(&e.branch)
+        .map(str::to_string)
+        .context("that branch belongs to no stack")
 }
 
 fn stack_names(st: &Stacks) -> String {

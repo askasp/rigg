@@ -98,14 +98,15 @@ loaded in the current shell.
 
 | key | does |
 | --- | --- |
-| `^X n` | `rigg new ""` with the cursor inside the quotes |
+| `^X n` | start a new stack |
+| `^X d` | add to a stack |
 | `^X m` | `rigg say ""`, likewise |
 | `^X a` | attach to a stack |
 | `^X l` | follow a run's log |
 | `^X s` | list stacks, keeping what you were typing |
 | `^X r` | remove a stack |
 
-Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
+Aliases: `rn`, `rad`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
 
 `say --push` commits and pushes whatever the turn changed, using the request as
 the commit subject, so a follow-up reaches the PR without a second command.
@@ -115,7 +116,7 @@ as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
 that is still running, has uncommitted work, or holds commits that are not on
 the trunk, unless `--force`; like `prune` it is a dry run until `--yes`.
 
-Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
+Where a stack name is omitted, `add`, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
 
