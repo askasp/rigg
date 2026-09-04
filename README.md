@@ -197,6 +197,10 @@ named after the branch. `--base` always means "root a new stack here". So
 running it twice from the trunk gives two independent stacks rather than
 accidentally piling the second onto the first.
 
+`stack pr` adds the preview label through the REST API rather than
+`gh pr edit --add-label`, which still queries Projects (classic) and therefore
+fails outright on GitHub today.
+
 `stack prune` deletes the merged branches along with their checkouts, since
 `git branch -d` refuses anything not actually merged; pass `--keep-branches` to
 keep them. It only touches a worktree whose branch is an ancestor of the trunk

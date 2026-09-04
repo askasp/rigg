@@ -719,10 +719,7 @@ fn real_main() -> Result<()> {
                     });
                     if frontend {
                         println!("frontend paths touched, labelling `{label}`");
-                        util::shell(
-                            &root,
-                            &format!("gh pr edit {branch} --add-label {label}"),
-                        )?;
+                        util::shell(&root, &label_command(&branch, label))?;
                     }
                 }
             }
@@ -1057,6 +1054,18 @@ fn start_detached(
     println!("  rigg logs {branch} -f");
     println!("  rigg attach {branch}");
     Ok(())
+}
+
+/// Add a label to the PR for `branch`.
+///
+/// `gh pr edit --add-label` still queries Projects (classic), which GitHub has
+/// deprecated, so it fails outright; the REST endpoint avoids that query.
+fn label_command(branch: &str, label: &str) -> String {
+    format!(
+        "set -e\n\
+         pr=$(gh pr list --head {branch} --json number --jq '.[0].number')\n\
+         gh api \"repos/{{owner}}/{{repo}}/issues/$pr/labels\" -f \"labels[]={label}\" --jq '[.[].name]'\n"
+    )
 }
 
 /// Wrap on whitespace for the run header.
@@ -1639,4 +1648,22 @@ fn which(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn label_command_is_valid_shell() {
+        let cmd = super::label_command("my-branch", "preview");
+        assert!(cmd.contains("issues/$pr/labels"), "{cmd}");
+        // gh's {owner}/{repo} placeholders must survive verbatim.
+        assert!(cmd.contains("repos/{owner}/{repo}"), "{cmd}");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .expect("sh");
+        assert!(out.status.success(), "invalid shell: {cmd}");
+    }
 }
