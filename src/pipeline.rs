@@ -147,7 +147,10 @@ impl Runner {
         let role = step.agent.clone().expect("validated: prompt implies agent");
         let acfg = self.cfg.agents[&role].clone();
         let kind = acfg.kind.clone();
-        let text = util::render(step.prompt.as_deref().unwrap_or(""), &self.vars);
+        let raw = step
+            .prompt_text(&self.cfg.dir)?
+            .unwrap_or_default();
+        let text = util::render(&raw, &self.vars);
 
         if self.backend_for(&role) == Backend::Headless {
             // A one-shot invocation has no session to clear, so `clear` inverts

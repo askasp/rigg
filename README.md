@@ -138,6 +138,28 @@ candidates.
 
 ## Config
 
+`.rigg/rigg.toml` in the repo (a plain `rigg.toml` at the root still works, and
+`.rigg/` wins if both exist). Keeping it in a directory leaves somewhere for the
+prompts to live:
+
+```
+.rigg/
+  rigg.toml
+  reviewer.md
+```
+
+A step takes either an inline `prompt` or a `prompt_file` relative to the config
+directory - both get the same `{{task}}` / `{{branch}}` / `{{base}}` / `{{repo}}`
+substitution:
+
+```toml
+[[steps]]
+id = "review"
+agent = "impl"
+clear = true
+prompt_file = "reviewer.md"
+```
+
 ```toml
 [agents.impl]
 kind = "claude"        # herdr agent kind

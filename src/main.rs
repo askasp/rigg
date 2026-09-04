@@ -310,9 +310,20 @@ fn real_main() -> Result<()> {
     match cli.cmd {
         Cmd::PluginRun | Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
-            let path = Config::path_for(&root);
+            let [preferred, legacy] = Config::candidates(&root);
+            if legacy.exists() && !force {
+                bail!(
+                    "{} already exists; move it to {} or pass --force",
+                    legacy.display(),
+                    preferred.display()
+                );
+            }
+            let path = preferred;
             if path.exists() && !force {
                 bail!("{} already exists (use --force)", path.display());
+            }
+            if let Some(d) = path.parent() {
+                std::fs::create_dir_all(d)?;
             }
             std::fs::write(&path, config::TEMPLATE)?;
             println!("wrote {}", path.display());
@@ -881,9 +892,15 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
             bail!("no steps matched --only");
         }
     }
-    let needs_task = steps
-        .iter()
-        .any(|s| s.prompt.as_deref().is_some_and(|p| p.contains("{{task}}")));
+    let mut needs_task = false;
+    for step in &steps {
+        if let Some(p) = step.prompt_text(&cfg.dir)? {
+            if p.contains("{{task}}") {
+                needs_task = true;
+                break;
+            }
+        }
+    }
     let task = match o.task {
         Some(t) => t,
         None if needs_task => ask("Task: ")?,

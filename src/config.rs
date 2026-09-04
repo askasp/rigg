@@ -77,6 +77,23 @@ pub struct AgentCfg {
     pub command: Option<Vec<String>>,
 }
 
+impl Step {
+    /// The step's prompt, read from `prompt_file` when that is what it uses.
+    pub fn prompt_text(&self, dir: &Path) -> Result<Option<String>> {
+        if let Some(p) = &self.prompt {
+            return Ok(Some(p.clone()));
+        }
+        if let Some(f) = &self.prompt_file {
+            let path = dir.join(f);
+            let text = std::fs::read_to_string(&path).with_context(|| {
+                format!("step `{}`: reading prompt file {}", self.id, path.display())
+            })?;
+            return Ok(Some(text));
+        }
+        Ok(None)
+    }
+}
+
 /// Accepts either `until = "done"` or `until = ["done", "blocked"]`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
