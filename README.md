@@ -106,6 +106,11 @@ loaded in the current shell.
 
 Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`.
 
+`say` with no arguments picks a stack and then asks what to send, the same shape
+as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
+that is still running, has uncommitted work, or holds commits that are not on
+the trunk, unless `--force`; like `prune` it is a dry run until `--yes`.
+
 Where a stack name is omitted, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.

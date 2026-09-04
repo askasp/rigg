@@ -94,8 +94,8 @@ enum Cmd {
     },
     /// Send a follow-up prompt to a stack's agent session.
     Say {
-        /// Stack or branch to talk to. Omit to choose.
-        target: String,
+        /// Stack or branch to talk to. Omit to choose from a list.
+        target: Option<String>,
         /// The message. If `target` is the only argument and reads like a
         /// sentence, it is taken as the message and the stack is chosen.
         message: Option<String>,
@@ -190,6 +190,18 @@ enum StackCmd {
         #[arg(long)]
         keep_branches: bool,
     },
+    /// Remove a whole stack: its worktrees, branches and bookkeeping.
+    Rm {
+        /// Stack to remove. Omit to choose.
+        stack: Option<String>,
+        /// Actually remove it. Without this it only shows what would go.
+        #[arg(long)]
+        yes: bool,
+        /// Remove even when a run is going, work is uncommitted, or a branch
+        /// has commits that are not on the trunk.
+        #[arg(long)]
+        force: bool,
+    },
     /// Open a PR for a stack entry against its own base.
     Pr {
         #[arg(long)]
@@ -201,7 +213,7 @@ enum StackCmd {
 /// can never describe bindings the shell does not actually have.
 const KEYS: [(&str, &str); 6] = [
     ("^X n", "rigg new \"\"  - cursor inside the quotes"),
-    ("^X m", "rigg say \"\"  - follow-up to a stack"),
+    ("^X m", "say something to a stack: pick it, then type"),
     ("^X a", "attach to a stack"),
     ("^X l", "follow a run's log"),
     ("^X s", "list stacks, keeping what you were typing"),
@@ -229,7 +241,7 @@ rigg-new-widget() { BUFFER='rigg new ""'; CURSOR=$(( ${#BUFFER} - 1 )); zle redi
 zle -N rigg-new-widget
 bindkey '^Xn' rigg-new-widget
 
-rigg-say-widget() { BUFFER='rigg say ""'; CURSOR=$(( ${#BUFFER} - 1 )); zle redisplay }
+rigg-say-widget() { BUFFER='rigg say'; zle accept-line }
 zle -N rigg-say-widget
 bindkey '^Xm' rigg-say-widget
 
@@ -650,9 +662,18 @@ fn real_main() -> Result<()> {
             agent,
         } => {
             let st = Stacks::load(&root)?;
-            let (entry, message) = match message {
-                Some(m) => (resolve_target(&root, &st, &target)?, m),
-                None => (pick_stack(&root, &st)?, target),
+            let (entry, message) = match (target, message) {
+                // Both given: an explicit target and its message.
+                (Some(t), Some(m)) => (resolve_target(&root, &st, &t)?, m),
+                // One argument is the message; choose who it goes to.
+                (Some(m), None) => (pick_stack(&root, &st)?, m),
+                // Nothing given: choose, then ask what to say.
+                (None, _) => {
+                    let e = pick_stack(&root, &st)?;
+                    let m = ask(&format!("say to {}> ", e.branch))
+                        .context("nothing to say")?;
+                    (e, m)
+                }
             };
             let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
             let cfg = Config::load(&dir, None)?;
@@ -684,6 +705,20 @@ fn real_main() -> Result<()> {
                 stack: stack_name,
             } => {
                 push_stack(&root, cli.config.as_deref(), &branch, base, stack_name, false)?;
+            }
+            StackCmd::Rm { stack, yes, force } => {
+                let st = Stacks::load(&root)?;
+                let name = match stack {
+                    Some(n) if st.stacks.contains_key(&n) => n,
+                    Some(n) => bail!("no stack `{n}`. Known stacks: {}", stack_names(&st)),
+                    None => {
+                        let e = pick_stack(&root, &st)?;
+                        st.stack_of(&e.branch)
+                            .map(str::to_string)
+                            .context("that branch belongs to no stack")?
+                    }
+                };
+                remove_stack(&root, &name, yes, force)?;
             }
             StackCmd::Names => {
                 for name in Stacks::load(&root)?.stacks.keys() {
@@ -819,11 +854,20 @@ fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
     }
 
     for (i, n) in names.iter().enumerate() {
-        let tip = st.tip_of(n).map(|e| e.branch.clone()).unwrap_or_default();
-        let extra = if &tip == *n { String::new() } else { format!("  (tip {tip})") };
-        println!("  {}  {n}{extra}", i + 1);
+        let target = resolve_target(root, st, n).ok();
+        let branch = target.as_ref().map(|e| e.branch.clone()).unwrap_or_default();
+        let extra = if &branch == *n {
+            String::new()
+        } else {
+            format!("  ({branch})")
+        };
+        let state = match run_state(root, &branch) {
+            s if s.is_empty() => String::new(),
+            s => format!("  [{s}]"),
+        };
+        println!("  {}  {:<28}{extra}{state}", i + 1, n);
     }
-    let answer = ask("stack> ")?;
+    let answer = ask("stack> ").context("no stack chosen")?;
     if let Ok(n) = answer.parse::<usize>() {
         if n >= 1 && n <= names.len() {
             return resolve_target(root, st, names[n - 1]);
@@ -1296,7 +1340,7 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     }
     let task = match o.task {
         Some(t) => t,
-        None if needs_task => ask("Task: ")?,
+        None if needs_task => ask("Task: ").context("this pipeline needs a task")?,
         None => String::new(),
     };
 
@@ -1439,6 +1483,100 @@ fn push_stack(
     println!("stack `{target}` is now {} deep", st.stacks[&target].len());
     println!("worktree at {path}");
     Ok(std::path::PathBuf::from(path))
+}
+
+/// Remove every branch of a stack, newest first.
+fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> Result<()> {
+    let mut st = Stacks::load(root)?;
+    let entries = st.stacks.get(name).cloned().unwrap_or_default();
+    let cfg = Config::load(root, None).unwrap_or_default();
+    let trunk = format!("origin/{}", cfg.stack.trunk);
+    let trunk = if util::git(root, &["rev-parse", "--verify", "--quiet", &trunk]).is_ok() {
+        trunk
+    } else {
+        cfg.stack.trunk.clone()
+    };
+
+    println!("stack `{name}`");
+    let mut blocked = Vec::new();
+    for e in entries.iter().rev() {
+        let dir = entry_path(root, e).ok();
+        let running = running_pid(root, &e.branch).is_some();
+        let dirty = dir
+            .as_deref()
+            .and_then(|d| util::git(std::path::Path::new(d), &["status", "--porcelain"]).ok())
+            .map(|o| o.lines().count())
+            .unwrap_or(0);
+        let unmerged = util::git(
+            root,
+            &["merge-base", "--is-ancestor", &format!("refs/heads/{}", e.branch), &trunk],
+        )
+        .is_err();
+
+        let mut notes = Vec::new();
+        if running {
+            notes.push("a run is going".to_string());
+        }
+        if dirty > 0 {
+            notes.push(format!("{dirty} uncommitted"));
+        }
+        if unmerged {
+            notes.push("not on the trunk".to_string());
+        }
+        if !notes.is_empty() && !force {
+            blocked.push(e.branch.clone());
+        }
+        println!(
+            "  {} {}{}",
+            if notes.is_empty() || force { "remove" } else { "KEEP  " },
+            e.branch,
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", notes.join(", "))
+            }
+        );
+    }
+
+    if !blocked.is_empty() {
+        println!(
+            "\n{} branch(es) hold work that is not on the trunk, uncommitted, or still \
+             running. Pass --force to remove them anyway.",
+            blocked.len()
+        );
+        return Ok(());
+    }
+    if !yes {
+        println!("\ndry run; pass --yes to remove");
+        return Ok(());
+    }
+
+    let ws = herdr::workspaces().unwrap_or_default();
+    // Newest first: a branch below is the base of the one above it.
+    for e in entries.iter().rev() {
+        if let Some(dir) = entry_path(root, e).ok() {
+            if let Some((id, _)) = ws.iter().find(|(_, p)| p == &dir) {
+                let _ = herdr::workspace_close(id);
+            }
+            let mut args = vec!["worktree", "remove", &dir];
+            if force {
+                args.push("--force");
+            }
+            if let Err(err) = util::git(root, &args) {
+                println!("  could not remove {}: {err}", e.branch);
+                continue;
+            }
+        }
+        let flag = if force { "-D" } else { "-d" };
+        match util::git(root, &["branch", flag, &e.branch]) {
+            Ok(_) => println!("  removed {}", e.branch),
+            Err(err) => println!("  removed {} (branch kept: {err})", e.branch),
+        }
+    }
+    st.stacks.remove(name);
+    st.save(root)?;
+    println!("\nstack `{name}` is gone");
+    Ok(())
 }
 
 /// Remove worktrees for branches already merged into the trunk.
@@ -1700,7 +1838,7 @@ fn ask(prompt: &str) -> Result<String> {
     std::io::stdin().read_line(&mut line)?;
     let line = line.trim().to_string();
     if line.is_empty() {
-        bail!("no task given");
+        bail!("nothing entered");
     }
     Ok(line)
 }
