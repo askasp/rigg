@@ -62,7 +62,11 @@ the task and generates a stack name.
 `new` starts a stack; `add` appends the next branch to one and runs the pipeline
 there; `say` continues the agent session in that stack's tip rather than running
 a pipeline. `attach` opens an interactive agent on the stack's checkout, resuming the
-session the pipeline was using (`--continue`), so you can take over by hand.
+session the pipeline was using (`--continue`), so you can take over by hand. It
+refuses while a run is still in flight - claude will not resume a conversation
+its own process still has open - so watch that with `rigg logs -f` and attach
+once it finishes, or `--force` to open a separate session alongside it. Stacks
+with a run in flight are marked `[running]` by `rigg stack list`.
 `--new` starts a fresh session instead, `--path` only prints the directory, and
 under herdr it focuses the existing workspace rather than starting a second
 agent on the same checkout.

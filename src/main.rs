@@ -78,6 +78,9 @@ enum Cmd {
         /// Start a fresh session instead of resuming the last one.
         #[arg(long)]
         new: bool,
+        /// Open even though a run is still in progress.
+        #[arg(long)]
+        force: bool,
         /// Agent role to open (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
@@ -360,6 +363,7 @@ fn real_main() -> Result<()> {
             target,
             path: path_only,
             new,
+            force,
             agent,
         } => {
             let st = Stacks::load(&root)?;
@@ -392,6 +396,21 @@ fn real_main() -> Result<()> {
                 return Ok(());
             }
 
+            // Claude will not resume a conversation its own process still has
+            // open, so attaching mid-run gives "No conversation found to
+            // continue" rather than the session you wanted.
+            if let Some(pid) = running_pid(&root, &entry.branch) {
+                if !force {
+                    bail!(
+                        "`{}` is still running (pid {pid}). Watch it with `rigg logs {} -f`, \
+                         or pass --force to open a separate session alongside it.",
+                        entry.branch,
+                        entry.branch
+                    );
+                }
+                println!("warning: a run is still in progress (pid {pid})");
+            }
+
             let cfg = Config::load(std::path::Path::new(&dir), None)?;
             let role = match agent {
                 Some(r) => r,
@@ -409,10 +428,12 @@ fn real_main() -> Result<()> {
                 .kind
                 .clone();
 
+            // Resuming only makes sense if there is something to resume.
+            let resumable = kind != "claude" || claude_has_session(&dir);
             println!("{} in {dir}", entry.branch);
             let mut cmd = std::process::Command::new(&kind);
             cmd.current_dir(&dir);
-            if !new {
+            if !new && resumable {
                 cmd.arg("--continue");
             }
             // Hand the terminal over: rigg has nothing left to do.
@@ -482,12 +503,14 @@ fn real_main() -> Result<()> {
                     for (i, e) in entries.iter().enumerate() {
                         let mark = if e.branch == here { "*" } else { " " };
                         let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        let gone = if entry_path(&root, e).is_ok() {
+                        let state = if running_pid(&root, &e.branch).is_some() {
+                            "  [running]"
+                        } else if entry_path(&root, e).is_ok() {
                             ""
                         } else {
                             "  (worktree gone)"
                         };
-                        println!("  {mark} {}. {} <- {}{}{}", i + 1, e.branch, e.base, pr, gone);
+                        println!("  {mark} {}. {} <- {}{}{}", i + 1, e.branch, e.base, pr, state);
                     }
                 }
             }
@@ -600,6 +623,37 @@ fn pick_stack(st: &Stacks) -> Result<Entry> {
     resolve_target(st, &answer)
 }
 
+fn pid_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
+    Ok(util::state_dir(root)?
+        .join("run")
+        .join(format!("{}.pid", branch.replace('/', "-"))))
+}
+
+/// The pid of a detached run for this branch, if one is still alive.
+fn running_pid(root: &std::path::Path, branch: &str) -> Option<u32> {
+    let raw = std::fs::read_to_string(pid_path(root, branch).ok()?).ok()?;
+    let pid: u32 = raw.trim().parse().ok()?;
+    // Confirm it is still our run and not a recycled pid.
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    String::from_utf8_lossy(&cmdline)
+        .contains("rigg")
+        .then_some(pid)
+}
+
+/// Does claude have a stored conversation for this directory?
+fn claude_has_session(dir: &str) -> bool {
+    let enc: String = dir
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    std::fs::read_dir(format!("{home}/.claude/projects/{enc}"))
+        .map(|mut d| d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "jsonl"))))
+        .unwrap_or(false)
+}
+
 fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
     Ok(util::state_dir(root)?
         .join("logs")
@@ -652,6 +706,12 @@ fn start_detached(
         .stderr(errs)
         .spawn()
         .context("could not start the pipeline in the background")?;
+
+    let pid = pid_path(root, branch)?;
+    if let Some(p) = pid.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    std::fs::write(&pid, child.id().to_string())?;
 
     println!("started `{branch}` in the background (pid {})", child.id());
     println!("  rigg logs {branch} -f");
