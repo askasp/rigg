@@ -39,6 +39,10 @@ pub struct Config {
     pub pipelines: BTreeMap<String, Pipeline>,
     #[serde(default)]
     pub stack: StackCfg,
+    /// Directory the config was loaded from; `prompt_file` paths resolve
+    /// against it.
+    #[serde(skip)]
+    pub dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -102,6 +106,10 @@ pub struct Step {
     /// Prompt text. Supports {{task}}, {{branch}}, {{base}}, {{repo}}.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Markdown file holding the prompt, relative to the config directory.
+    /// The same placeholders apply.
+    #[serde(default)]
+    pub prompt_file: Option<String>,
     /// Shell command instead of an agent prompt.
     #[serde(default)]
     pub run: Option<String>,
@@ -164,8 +172,18 @@ fn default_trunk() -> String {
 }
 
 impl Config {
+    /// Preferred config location, and the legacy one beside it.
+    pub fn candidates(root: &Path) -> [PathBuf; 2] {
+        [root.join(".rigg").join("rigg.toml"), root.join("rigg.toml")]
+    }
+
     pub fn path_for(root: &Path) -> PathBuf {
-        root.join("rigg.toml")
+        let [preferred, legacy] = Self::candidates(root);
+        if !preferred.exists() && legacy.exists() {
+            legacy
+        } else {
+            preferred
+        }
     }
 
     pub fn load(root: &Path, explicit: Option<&str>) -> Result<Self> {
@@ -173,12 +191,11 @@ impl Config {
             Some(p) => PathBuf::from(p),
             None => Self::path_for(root),
         };
-        // A worktree checked out before rigg.toml was committed will not have
-        // one, so fall back to the primary checkout's config.
+        // A worktree checked out before the config was committed will not have
+        // one, so fall back to the primary checkout's.
         if !path.exists() && explicit.is_none() {
             if let Ok(main) = crate::util::main_checkout(root) {
-                let alt = main.join("rigg.toml");
-                if alt.exists() {
+                if let Some(alt) = Self::candidates(&main).into_iter().find(|p| p.exists()) {
                     path = alt;
                 }
             }
@@ -191,8 +208,12 @@ impl Config {
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| root.to_path_buf());
         cfg.validate()?;
         Ok(cfg)
     }
@@ -230,11 +251,21 @@ impl Config {
             .iter()
             .chain(self.pipelines.values().flat_map(|p| p.steps.iter()));
         for step in all {
-            if step.run.is_none() && step.prompt.is_none() {
-                bail!("step `{}` has neither `prompt` nor `run`", step.id);
+            let prompts = step.prompt.is_some() as u8 + step.prompt_file.is_some() as u8;
+            if step.run.is_none() && prompts == 0 {
+                bail!(
+                    "step `{}` has none of `prompt`, `prompt_file` or `run`",
+                    step.id
+                );
             }
-            if step.run.is_some() && step.prompt.is_some() {
-                bail!("step `{}` sets both `prompt` and `run`", step.id);
+            if prompts == 2 {
+                bail!(
+                    "step `{}` sets both `prompt` and `prompt_file`",
+                    step.id
+                );
+            }
+            if step.run.is_some() && prompts > 0 {
+                bail!("step `{}` sets both a prompt and `run`", step.id);
             }
             if let Some(role) = &step.agent {
                 if !self.agents.contains_key(role) {
@@ -244,7 +275,7 @@ impl Config {
                         role
                     );
                 }
-            } else if step.prompt.is_some() {
+            } else if prompts > 0 {
                 bail!("step `{}` has a prompt but no `agent`", step.id);
             }
         }
