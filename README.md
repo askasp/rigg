@@ -75,8 +75,10 @@ with a run in flight are marked `[running]` by `rigg stack list`.
 under herdr it focuses the existing workspace rather than starting a second
 agent on the same checkout.
 
-A stack name resolves to its tip, and a branch name to itself, so both
-`rigg say billing` and `rigg say billing-2` work.
+A branch name resolves to itself. A stack name resolves to the branch you most
+likely mean - the one being worked on now, else the newest that exists on disk -
+because the tip of a queued stack is usually still waiting and has no checkout
+yet. So `rigg attach billing` reaches whichever branch of that stack is running.
 
 ### Shell integration
 

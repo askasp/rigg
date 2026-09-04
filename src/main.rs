@@ -508,8 +508,8 @@ fn real_main() -> Result<()> {
         Cmd::Logs { target, follow } => {
             let st = Stacks::load(&root)?;
             let branch = match target {
-                Some(t) => resolve_target(&st, &t).map(|e| e.branch).unwrap_or(t),
-                None => pick_stack(&st)?.branch,
+                Some(t) => resolve_target(&root, &st, &t).map(|e| e.branch).unwrap_or(t),
+                None => pick_stack(&root, &st)?.branch,
             };
             let log = log_path(&root, &branch)?;
             if !log.exists() {
@@ -535,14 +535,14 @@ fn real_main() -> Result<()> {
         } => {
             let st = Stacks::load(&root)?;
             let entry = match target {
-                Some(t) => resolve_target(&st, &t)?,
+                Some(t) => resolve_target(&root, &st, &t)?,
                 // No target: prefer the stack we are standing in, else choose.
                 None => match util::current_branch(&root)
                     .ok()
-                    .and_then(|b| resolve_target(&st, &b).ok())
+                    .and_then(|b| resolve_target(&root, &st, &b).ok())
                 {
                     Some(e) => e,
-                    None => pick_stack(&st)?,
+                    None => pick_stack(&root, &st)?,
                 },
             };
             let dir = entry_path(&root, &entry)?;
@@ -626,8 +626,8 @@ fn real_main() -> Result<()> {
         } => {
             let st = Stacks::load(&root)?;
             let (entry, message) = match message {
-                Some(m) => (resolve_target(&st, &target)?, m),
-                None => (pick_stack(&st)?, target),
+                Some(m) => (resolve_target(&root, &st, &target)?, m),
+                None => (pick_stack(&root, &st)?, target),
             };
             let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
             let cfg = Config::load(&dir, None)?;
@@ -758,13 +758,13 @@ fn shellexpand_home(p: &str) -> String {
 
 /// Choose a stack interactively: one stack needs no choosing, fzf is used when
 /// present, otherwise a numbered list.
-fn pick_stack(st: &Stacks) -> Result<Entry> {
+fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
     if st.stacks.is_empty() {
         bail!("no stacks; start one with `rigg new \"<task>\"`");
     }
     let names: Vec<&String> = st.stacks.keys().collect();
     if names.len() == 1 {
-        return resolve_target(st, names[0]);
+        return resolve_target(root, st, names[0]);
     }
 
     if which("fzf") {
@@ -784,7 +784,7 @@ fn pick_stack(st: &Stacks) -> Result<Entry> {
         if choice.is_empty() {
             bail!("nothing selected");
         }
-        return resolve_target(st, &choice);
+        return resolve_target(root, st, &choice);
     }
 
     for (i, n) in names.iter().enumerate() {
@@ -795,10 +795,10 @@ fn pick_stack(st: &Stacks) -> Result<Entry> {
     let answer = ask("stack> ")?;
     if let Ok(n) = answer.parse::<usize>() {
         if n >= 1 && n <= names.len() {
-            return resolve_target(st, names[n - 1]);
+            return resolve_target(root, st, names[n - 1]);
         }
     }
-    resolve_target(st, &answer)
+    resolve_target(root, st, &answer)
 }
 
 fn status_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
@@ -1067,10 +1067,24 @@ fn stack_names(st: &Stacks) -> String {
     }
 }
 
-/// Resolve a stack name (to its tip) or a branch name (to itself).
-fn resolve_target(st: &Stacks, name: &str) -> Result<Entry> {
-    if let Some(e) = st.tip_of(name) {
-        return Ok(e.clone());
+/// Resolve a branch name to itself, or a stack name to the branch you most
+/// likely mean: the one being worked on now, else the newest that exists on
+/// disk. The tip of a queued stack is usually still waiting and has no
+/// checkout yet, so it is the wrong answer.
+fn resolve_target(root: &std::path::Path, st: &Stacks, name: &str) -> Result<Entry> {
+    if let Some(entries) = st.stacks.get(name) {
+        if let Some(e) = entries
+            .iter()
+            .find(|e| running_pid(root, &e.branch).is_some() && entry_path(root, e).is_ok())
+        {
+            return Ok(e.clone());
+        }
+        if let Some(e) = entries.iter().rev().find(|e| entry_path(root, e).is_ok()) {
+            return Ok(e.clone());
+        }
+        if let Some(e) = entries.last() {
+            return Ok(e.clone());
+        }
     }
     if let Some(e) = st.find(name) {
         return Ok(e.clone());
