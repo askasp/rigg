@@ -346,12 +346,29 @@ fn real_main() -> Result<()> {
             if st.stacks.is_empty() {
                 println!("stacks (none)");
             } else {
+                println!();
                 for (name, entries) in &st.stacks {
-                    println!("stack  {name}");
-                    for e in entries {
+                    println!("{name}");
+                    for (i, e) in entries.iter().enumerate() {
                         let marker = if e.branch == branch { "*" } else { " " };
-                        let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        println!("    {marker} {} <- {}{}", e.branch, e.base, pr);
+                        let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
+                        let mut state = run_state(&root, &e.branch);
+                        if state.is_empty() && entry_path(&root, e).is_err() {
+                            state = "worktree gone".into();
+                        }
+                        let state = if state.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{state}]")
+                        };
+                        println!(
+                            "  {marker} {}. {:<28} <- {}{}{}",
+                            i + 1,
+                            e.branch,
+                            e.base,
+                            pr,
+                            state
+                        );
                     }
                 }
             }
@@ -680,15 +697,24 @@ fn real_main() -> Result<()> {
                     println!("{name}");
                     for (i, e) in entries.iter().enumerate() {
                         let mark = if e.branch == here { "*" } else { " " };
-                        let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        let state = if running_pid(&root, &e.branch).is_some() {
-                            "  [running]"
-                        } else if entry_path(&root, e).is_ok() {
-                            ""
+                        let pr = e.pr.map(|n| format!(" #{n}")).unwrap_or_default();
+                        let mut state = run_state(&root, &e.branch);
+                        if state.is_empty() && entry_path(&root, e).is_err() {
+                            state = "worktree gone".into();
+                        }
+                        let state = if state.is_empty() {
+                            String::new()
                         } else {
-                            "  (worktree gone)"
+                            format!("  [{state}]")
                         };
-                        println!("  {mark} {}. {} <- {}{}{}", i + 1, e.branch, e.base, pr, state);
+                        println!(
+                            "  {mark} {}. {:<28} <- {}{}{}",
+                            i + 1,
+                            e.branch,
+                            e.base,
+                            pr,
+                            state
+                        );
                     }
                 }
             }
@@ -849,6 +875,64 @@ fn claude_has_session(dir: &str) -> bool {
     std::fs::read_dir(format!("{home}/.claude/projects/{enc}"))
         .map(|mut d| d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "jsonl"))))
         .unwrap_or(false)
+}
+
+/// The last step header a run wrote, as "2/9 apply-copilot-review".
+fn last_step(root: &std::path::Path, branch: &str) -> Option<String> {
+    let path = log_path(root, branch).ok()?;
+    let text = read_tail(&path, 64 * 1024)?;
+    let mut found = None;
+    for line in text.lines() {
+        let t = line.trim_start_matches(['-', ' ']);
+        let Some(rest) = t.strip_prefix('[') else { continue };
+        let Some((counter, tail)) = rest.split_once(']') else { continue };
+        if !counter.contains('/') {
+            continue;
+        }
+        // Strip the rule and timestamp the header is padded with.
+        let label = tail.trim().trim_end_matches(|c: char| c == '-' || c.is_whitespace());
+        let label = label
+            .rsplit_once(' ')
+            .filter(|(_, t)| t.len() == 8 && t.contains(':'))
+            .map(|(l, _)| l)
+            .unwrap_or(label);
+        found = Some(format!("{counter} {}", label.trim().trim_end_matches('-').trim()));
+    }
+    found
+}
+
+/// Read at most `max` bytes from the end of a file.
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// One-line description of where a branch's run got to.
+fn run_state(root: &std::path::Path, branch: &str) -> String {
+    if running_pid(root, branch).is_some() {
+        return match last_step(root, branch) {
+            Some(step) => format!("running {step}"),
+            None => "running".into(),
+        };
+    }
+    match last_status(root, branch).as_deref() {
+        Some("ok") => "done".into(),
+        Some(other) => {
+            let short = other.strip_prefix("failed: ").unwrap_or(other);
+            format!("failed {}", short.split(" after ").next().unwrap_or(short))
+        }
+        None => match last_step(root, branch) {
+            Some(step) => format!("stopped at {step}"),
+            None => String::new(),
+        },
+    }
 }
 
 fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
