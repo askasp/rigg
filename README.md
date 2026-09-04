@@ -76,12 +76,15 @@ A stack name resolves to its tip, and a branch name to itself, so both
 
 ### Shell integration
 
-`completions/_rigg` completes stack names (zsh). `rigg.zsh` adds aliases and
-keybindings - source it from `~/.zshrc`:
+`completions/_rigg` completes stack names (zsh). Keybindings and aliases come
+from the binary, so add to `~/.zshrc`:
 
 ```sh
-source /path/to/rigg/rigg.zsh
+source <(rigg keys --shell zsh)
 ```
+
+`rigg keys` prints them at any time, and says so if the integration is not
+loaded in the current shell.
 
 | key | does |
 | --- | --- |
