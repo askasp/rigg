@@ -7,6 +7,7 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 
 use config::{Backend, Config};
@@ -60,13 +61,19 @@ enum Cmd {
         #[arg(long)]
         headless: bool,
     },
-    /// Print where a stack lives, or focus its session under herdr.
+    /// Open an interactive agent on a stack, resuming its session.
     Attach {
         /// Stack or branch name (default: whatever the cwd is in).
         target: Option<String>,
-        /// Print only the path, for `cd "$(rigg attach --path billing)"`.
+        /// Print only the checkout path, for `cd "$(rigg attach --path billing)"`.
         #[arg(long)]
         path: bool,
+        /// Start a fresh session instead of resuming the last one.
+        #[arg(long)]
+        new: bool,
+        /// Agent role to open (default: the first one configured).
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Send a follow-up prompt to a stack's agent session.
     Say {
@@ -290,33 +297,61 @@ fn real_main() -> Result<()> {
             )?;
         }
 
-        Cmd::Attach { target, path: path_only } => {
+        Cmd::Attach {
+            target,
+            path: path_only,
+            new,
+            agent,
+        } => {
             let st = Stacks::load(&root)?;
             let entry = match target {
                 Some(t) => resolve_target(&st, &t)?,
-                None => {
-                    let b = util::current_branch(&root)?;
-                    resolve_target(&st, &b)?
-                }
+                None => resolve_target(&st, &util::current_branch(&root)?)?,
             };
             let dir = entry_path(&root, &entry)?;
             if path_only {
                 println!("{dir}");
                 return Ok(());
             }
-            let focused = herdr::workspaces()
+
+            // Under herdr the session already has a pane; focus that instead of
+            // starting a second agent on the same checkout.
+            if let Some((id, _)) = herdr::workspaces()
                 .unwrap_or_default()
                 .into_iter()
                 .find(|(_, p)| p == &dir)
-                .map(|(id, _)| herdr::workspace_focus(&id));
-            match focused {
-                Some(Ok(())) => println!("focused workspace for {}", entry.branch),
-                _ => {
-                    println!("{}", entry.branch);
-                    println!("{dir}");
-                    println!("cd \"$(rigg attach --path {})\"", entry.branch);
-                }
+            {
+                herdr::workspace_focus(&id)?;
+                println!("focused workspace for {}", entry.branch);
+                return Ok(());
             }
+
+            let cfg = Config::load(std::path::Path::new(&dir), None)?;
+            let role = match agent {
+                Some(r) => r,
+                None => cfg
+                    .agents
+                    .keys()
+                    .next()
+                    .cloned()
+                    .context("no agents configured")?,
+            };
+            let kind = cfg
+                .agents
+                .get(&role)
+                .with_context(|| format!("no agent role `{role}`"))?
+                .kind
+                .clone();
+
+            println!("{} in {dir}", entry.branch);
+            let mut cmd = std::process::Command::new(&kind);
+            cmd.current_dir(&dir);
+            if !new {
+                cmd.arg("--continue");
+            }
+            // Hand the terminal over: rigg has nothing left to do.
+            let err = cmd.exec();
+            bail!("could not start `{kind}`: {err}");
         }
 
         Cmd::Say {

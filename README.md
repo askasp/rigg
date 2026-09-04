@@ -47,14 +47,18 @@ rigg new billing "Add proration to subscription changes"
 rigg quick new billing "..."      # use the pipeline named `quick`
 rigg add billing "Expose it in the API"   # next branch, auto-named billing-2
 rigg say billing "also handle refunds"    # another turn in that stack's session
-rigg attach --path billing        # cd "$(rigg attach --path billing)"
+rigg attach billing               # open claude/opencode on that stack's session
+rigg attach --path billing        # just the path: cd "$(rigg attach --path billing)"
 rigg stack names                  # for shell completion
 ```
 
 `new` starts a stack; `add` appends the next branch to one and runs the pipeline
 there; `say` continues the agent session in that stack's tip rather than running
-a pipeline. `attach` resolves a stack to its checkout - printing the path when
-there is no herdr session to focus.
+a pipeline. `attach` opens an interactive agent on the stack's checkout, resuming the
+session the pipeline was using (`--continue`), so you can take over by hand.
+`--new` starts a fresh session instead, `--path` only prints the directory, and
+under herdr it focuses the existing workspace rather than starting a second
+agent on the same checkout.
 
 A stack name resolves to its tip, and a branch name to itself, so both
 `rigg say billing` and `rigg say billing-2` work.
