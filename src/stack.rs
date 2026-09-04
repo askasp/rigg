@@ -83,9 +83,9 @@ impl Stacks {
     }
 
     /// Drop branches that no longer exist, and any stack left empty.
-    pub fn retain_branches(&mut self, keep: impl Fn(&Entry) -> bool) {
+    pub fn retain_branches(&mut self, mut keep: impl FnMut(&Entry) -> bool) {
         for entries in self.stacks.values_mut() {
-            entries.retain(&keep);
+            entries.retain(|e| keep(e));
         }
         self.stacks.retain(|_, es| !es.is_empty());
     }

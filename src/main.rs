@@ -374,9 +374,10 @@ fn real_main() -> Result<()> {
                     for (i, e) in entries.iter().enumerate() {
                         let mark = if e.branch == here { "*" } else { " " };
                         let pr = e.pr.map(|n| format!("  #{n}")).unwrap_or_default();
-                        let gone = match &e.path {
-                            Some(p) if !std::path::Path::new(p).exists() => "  (worktree gone)",
-                            _ => "",
+                        let gone = if entry_path(&root, e).is_ok() {
+                            ""
+                        } else {
+                            "  (worktree gone)"
                         };
                         println!("  {mark} {}. {} <- {}{}{}", i + 1, e.branch, e.base, pr, gone);
                     }
@@ -742,6 +743,19 @@ fn prune(
     }
     let mut st = Stacks::load(root)?;
     st.retain_branches(|e| !candidates.iter().any(|(_, b)| b == &e.branch));
+    // Stack entries whose checkout is gone are just stale bookkeeping.
+    let mut stale = Vec::new();
+    st.retain_branches(|e| {
+        if entry_path(root, e).is_ok() {
+            true
+        } else {
+            stale.push(e.branch.clone());
+            false
+        }
+    });
+    if !stale.is_empty() {
+        println!("dropped stale stack entries: {}", stale.join(", "));
+    }
     st.save(root)?;
     println!("\nremoved {removed}, failed {failed}");
     Ok(())
