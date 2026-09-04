@@ -39,19 +39,33 @@ rigg run --headless --task "..."      # no herdr: claude -p / opencode run
 rigg status
 ```
 
-The short form, which is how you will normally start work:
+The short form, which is how you will normally start work. Everything is
+addressed **by stack name**, so it works from any directory:
 
 ```sh
 rigg new billing "Add proration to subscription changes"
-rigg quick new billing "..."   # run the pipeline named `quick` instead
-rigg add billing-2 "Now expose it in the API"   # next branch in the same stack
-rigg attach billing            # focus that branch's session
-rigg say "also handle the refund case"          # follow-up into the same session
+rigg quick new billing "..."      # use the pipeline named `quick`
+rigg add billing "Expose it in the API"   # next branch, auto-named billing-2
+rigg say billing "also handle refunds"    # another turn in that stack's session
+rigg attach --path billing        # cd "$(rigg attach --path billing)"
+rigg stack names                  # for shell completion
 ```
 
-`new` starts a stack and runs the pipeline on it; `add` appends to the stack you
-are standing in. `say` continues the existing agent session rather than starting
-a pipeline - one more turn in the conversation that is already going.
+`new` starts a stack; `add` appends the next branch to one and runs the pipeline
+there; `say` continues the agent session in that stack's tip rather than running
+a pipeline. `attach` resolves a stack to its checkout - printing the path when
+there is no herdr session to focus.
+
+A stack name resolves to its tip, and a branch name to itself, so both
+`rigg say billing` and `rigg say billing-2` work.
+
+Shell completion for stack names lives in `completions/_rigg` (zsh).
+
+### Stacking needs commits
+
+Each branch is cut from the previous branch's last commit, so a pipeline that
+stacks must commit its work - otherwise the next branch silently starts without
+it. `rigg add` refuses when the base branch's checkout is dirty.
 
 Stacked PRs — each branch is a Herdr worktree rooted on the one below it, so
 every PR is reviewable on its own. Stacks are named, and several can sit on the

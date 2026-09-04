@@ -54,6 +54,23 @@ pub fn changed_files(root: &std::path::Path, base: &str) -> Result<Vec<String>> 
     Ok(files)
 }
 
+/// Create a worktree with plain git, for setups with no herdr.
+pub fn git_worktree_add(
+    main: &std::path::Path,
+    branch: &str,
+    base: &str,
+    dest: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    git(
+        main,
+        &["worktree", "add", "-b", branch, &dest.to_string_lossy(), base],
+    )?;
+    Ok(())
+}
+
 /// The repository's primary checkout, which is where worktree creation has to
 /// run from - herdr refuses to branch a new worktree off a linked one.
 pub fn main_checkout(root: &std::path::Path) -> Result<PathBuf> {

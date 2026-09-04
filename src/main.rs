@@ -46,27 +46,34 @@ enum Cmd {
         #[arg(long)]
         headless: bool,
     },
-    /// Append a branch to the current stack and run a pipeline on it.
+    /// Append the next branch to a stack and run a pipeline on it.
     Add {
-        name: String,
+        /// Stack to extend. The new branch is named <stack>-<n>.
+        stack: String,
+        /// The task. Prompted for if omitted.
         prompt: Option<String>,
         #[arg(long)]
         pipeline: Option<String>,
-        /// Stack to append to (default: the one holding the current branch).
+        /// Name the new branch explicitly instead of <stack>-<n>.
         #[arg(long)]
-        stack: Option<String>,
+        branch: Option<String>,
         #[arg(long)]
         headless: bool,
     },
-    /// Focus the session for a branch.
+    /// Print where a stack lives, or focus its session under herdr.
     Attach {
-        /// Branch to attach to (default: the current one).
-        branch: Option<String>,
+        /// Stack or branch name (default: whatever the cwd is in).
+        target: Option<String>,
+        /// Print only the path, for `cd "$(rigg attach --path billing)"`.
+        #[arg(long)]
+        path: bool,
     },
-    /// Send a follow-up prompt to the agent already working here.
+    /// Send a follow-up prompt to a stack's agent session.
     Say {
+        /// Stack or branch to talk to.
+        target: String,
         message: String,
-        /// Agent role to talk to (default: the first one configured).
+        /// Agent role (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
     },
@@ -128,6 +135,8 @@ enum StackCmd {
     },
     /// List the stack, bottom to top.
     List,
+    /// Print stack names, one per line, for shell completion.
+    Names,
     /// Remove worktrees whose branch has already landed on the trunk.
     Prune {
         /// Ref to test against (default: origin/<trunk>, else <trunk>).
@@ -249,8 +258,31 @@ fn real_main() -> Result<()> {
             )?;
         }
 
-        Cmd::Add { name, prompt, pipeline, stack, headless } => {
-            let path = push_stack(&root, cli.config.as_deref(), &name, None, stack, false)?;
+        Cmd::Add {
+            stack,
+            prompt,
+            pipeline,
+            branch,
+            headless,
+        } => {
+            let st = Stacks::load(&root)?;
+            if !st.stacks.contains_key(&stack) {
+                bail!(
+                    "no stack `{stack}`. Known stacks: {}. Use `rigg new {stack} \"...\"` \
+                     to start one.",
+                    stack_names(&st)
+                );
+            }
+            let n = st.stacks[&stack].len() + 1;
+            let branch = branch.unwrap_or_else(|| format!("{stack}-{n}"));
+            let path = push_stack(
+                &root,
+                cli.config.as_deref(),
+                &branch,
+                None,
+                Some(stack),
+                false,
+            )?;
             execute(
                 &path,
                 None,
@@ -258,39 +290,44 @@ fn real_main() -> Result<()> {
             )?;
         }
 
-        Cmd::Attach { branch } => {
-            let branch = match branch {
-                Some(b) => b,
-                None => util::current_branch(&root)?,
+        Cmd::Attach { target, path: path_only } => {
+            let st = Stacks::load(&root)?;
+            let entry = match target {
+                Some(t) => resolve_target(&st, &t)?,
+                None => {
+                    let b = util::current_branch(&root)?;
+                    resolve_target(&st, &b)?
+                }
             };
-            let from = util::main_checkout(&root)?;
-            let path = Stacks::load(&root)?
-                .find(&branch)
-                .and_then(|e| e.path.clone())
-                .or_else(|| util::worktree_path(&from, &branch))
-                .with_context(|| format!("no worktree for branch `{branch}`"))?;
-
-            if let Some((id, _)) = herdr::workspaces()
+            let dir = entry_path(&root, &entry)?;
+            if path_only {
+                println!("{dir}");
+                return Ok(());
+            }
+            let focused = herdr::workspaces()
                 .unwrap_or_default()
                 .into_iter()
-                .find(|(_, p)| p == &path)
-            {
-                herdr::workspace_focus(&id)?;
-                println!("focused workspace for {branch}");
-            } else if let Some(a) = herdr::agents()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|a| a.cwd == path)
-            {
-                herdr::agent_focus(&a.pane_id)?;
-                println!("focused {} in {}", a.pane_id, branch);
-            } else {
-                println!("no live session for {branch}; its worktree is at {path}");
+                .find(|(_, p)| p == &dir)
+                .map(|(id, _)| herdr::workspace_focus(&id));
+            match focused {
+                Some(Ok(())) => println!("focused workspace for {}", entry.branch),
+                _ => {
+                    println!("{}", entry.branch);
+                    println!("{dir}");
+                    println!("cd \"$(rigg attach --path {})\"", entry.branch);
+                }
             }
         }
 
-        Cmd::Say { message, agent } => {
-            let cfg = Config::load(&root, cli.config.as_deref())?;
+        Cmd::Say {
+            target,
+            message,
+            agent,
+        } => {
+            let st = Stacks::load(&root)?;
+            let entry = resolve_target(&st, &target)?;
+            let dir = std::path::PathBuf::from(entry_path(&root, &entry)?);
+            let cfg = Config::load(&dir, None)?;
             let role = match agent {
                 Some(r) => r,
                 None => cfg
@@ -300,17 +337,16 @@ fn real_main() -> Result<()> {
                     .cloned()
                     .context("no agents configured")?,
             };
-            let branch = util::current_branch(&root)?;
             let mut vars = BTreeMap::new();
-            vars.insert("branch".into(), branch);
-            vars.insert("repo".into(), root.to_string_lossy().to_string());
+            vars.insert("branch".into(), entry.branch.clone());
+            vars.insert("repo".into(), dir.to_string_lossy().to_string());
             let step = config::Step {
                 id: "say".into(),
                 agent: Some(role),
                 prompt: Some(message),
                 ..Default::default()
             };
-            pipeline::Runner::new(root.clone(), cfg, vars, false, false).run(&[step])?;
+            pipeline::Runner::new(dir, cfg, vars, false, false).run(&[step])?;
         }
 
         Cmd::Stack { cmd } => match cmd {
@@ -320,6 +356,11 @@ fn real_main() -> Result<()> {
                 stack: stack_name,
             } => {
                 push_stack(&root, cli.config.as_deref(), &branch, base, stack_name, false)?;
+            }
+            StackCmd::Names => {
+                for name in Stacks::load(&root)?.stacks.keys() {
+                    println!("{name}");
+                }
             }
             StackCmd::Prune { base, yes } => prune(&root, cli.config.as_deref(), base, yes)?,
             StackCmd::List => {
@@ -378,6 +419,66 @@ fn real_main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// Checkout location for a worktree rigg creates itself.
+fn worktree_dest(cfg: &Config, main: &std::path::Path, branch: &str) -> std::path::PathBuf {
+    let base = match &cfg.stack.worktree_dir {
+        Some(d) => std::path::PathBuf::from(shellexpand_home(d)),
+        None => {
+            let repo = main
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "repo".into());
+            std::path::PathBuf::from(shellexpand_home("~/.rigg/worktrees")).join(repo)
+        }
+    };
+    base.join(branch.replace('/', "-"))
+}
+
+fn shellexpand_home(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(h) => format!("{h}/{rest}"),
+            Err(_) => p.to_string(),
+        },
+        None => p.to_string(),
+    }
+}
+
+fn stack_names(st: &Stacks) -> String {
+    if st.stacks.is_empty() {
+        "(none)".into()
+    } else {
+        st.stacks.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// Resolve a stack name (to its tip) or a branch name (to itself).
+fn resolve_target(st: &Stacks, name: &str) -> Result<Entry> {
+    if let Some(e) = st.tip_of(name) {
+        return Ok(e.clone());
+    }
+    if let Some(e) = st.find(name) {
+        return Ok(e.clone());
+    }
+    bail!(
+        "no stack or branch `{name}`. Known stacks: {}",
+        stack_names(st)
+    )
+}
+
+/// Where a stack entry's checkout lives, recovering the path if it was not
+/// recorded when the worktree was made.
+fn entry_path(root: &std::path::Path, e: &Entry) -> Result<String> {
+    if let Some(p) = &e.path {
+        if std::path::Path::new(p).exists() {
+            return Ok(p.clone());
+        }
+    }
+    let from = util::main_checkout(root)?;
+    util::worktree_path(&from, &e.branch)
+        .with_context(|| format!("no worktree on disk for `{}`", e.branch))
 }
 
 #[derive(Default)]
@@ -494,8 +595,34 @@ fn push_stack(
     }
     println!("creating worktree {branch} on top of {base}");
 
+    // A new branch is cut from `base`'s last commit, so anything still
+    // uncommitted there would silently not be part of it.
+    if let Some(base_entry) = st.find(&base) {
+        if let Ok(dir) = entry_path(root, base_entry) {
+            let dirty = util::git(std::path::Path::new(&dir), &["status", "--porcelain"])
+                .map(|o| !o.trim().is_empty())
+                .unwrap_or(false);
+            if dirty {
+                bail!(
+                    "`{base}` has uncommitted changes in {dir}, which the new branch \
+                     would not include. Commit them first (a pipeline that stacks \
+                     needs a commit step)."
+                );
+            }
+        }
+    }
+
     let from = util::main_checkout(root)?;
-    let mut path = herdr::worktree_create(branch, &base, &from.to_string_lossy())?;
+    // Herdr gives the worktree its own workspace; without it (or in a headless
+    // setup) plain git is enough and keeps rigg usable on its own.
+    let use_herdr = cfg.backend != Backend::Headless && herdr::inside_session();
+    let mut path = if use_herdr {
+        herdr::worktree_create(branch, &base, &from.to_string_lossy())?
+    } else {
+        let dest = worktree_dest(&cfg, &from, branch);
+        util::git_worktree_add(&from, branch, &base, &dest)?;
+        dest.to_string_lossy().to_string()
+    };
     if path.is_empty() {
         path = util::worktree_path(&from, branch).unwrap_or_default();
     }

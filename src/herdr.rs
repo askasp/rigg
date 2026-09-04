@@ -189,11 +189,6 @@ pub fn workspace_focus(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn agent_focus(target: &str) -> Result<()> {
-    call(&["agent", "focus", target])?;
-    Ok(())
-}
-
 pub fn workspace_close(id: &str) -> Result<()> {
     call(&["workspace", "close", id])?;
     Ok(())

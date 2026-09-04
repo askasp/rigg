@@ -1,0 +1,35 @@
+#compdef rigg
+# zsh completion. Install with:
+#   mkdir -p ~/.zfunc && cp completions/_rigg ~/.zfunc/
+#   echo 'fpath=(~/.zfunc $fpath); autoload -U compinit; compinit' >> ~/.zshrc
+
+_rigg_stacks() {
+  local -a names
+  names=(${(f)"$(rigg stack names 2>/dev/null)"})
+  _describe 'stack' names
+}
+
+_rigg() {
+  local -a cmds
+  cmds=(
+    'new:Start a new stack and run a pipeline on it'
+    'add:Append the next branch to a stack'
+    'say:Send a follow-up prompt to a stack'
+    'attach:Print where a stack lives'
+    'run:Run the pipeline here'
+    'status:Show branch and stack state'
+    'doctor:Check the environment'
+    'stack:Manage stacks'
+    'init:Write a starter rigg.toml'
+  )
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+    return
+  fi
+  case "${words[2]}" in
+    add|say|attach) (( CURRENT == 3 )) && _rigg_stacks ;;
+    stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr ;;
+  esac
+}
+
+_rigg "$@"

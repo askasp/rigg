@@ -142,6 +142,10 @@ pub struct StackCfg {
     /// Globs that mark a change as frontend.
     #[serde(default)]
     pub frontend_paths: Vec<String>,
+    /// Where to put worktrees when not going through herdr. Defaults to
+    /// ~/.rigg/worktrees/<repo>.
+    #[serde(default)]
+    pub worktree_dir: Option<String>,
 }
 
 impl Default for StackCfg {
@@ -150,6 +154,7 @@ impl Default for StackCfg {
             trunk: default_trunk(),
             preview_label: None,
             frontend_paths: Vec::new(),
+            worktree_dir: None,
         }
     }
 }
