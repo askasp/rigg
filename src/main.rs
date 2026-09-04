@@ -1512,7 +1512,19 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>, force_headless: bool) 
         None => Config::path_for(root),
     };
     match &cfg {
-        Ok(c) => println!("config         ok ({} steps)", c.steps.len()),
+        Ok(c) => {
+            let n = c.steps_for(None).map(|s| s.len()).unwrap_or(0);
+            let named: Vec<&str> = c.pipelines.keys().map(|s| s.as_str()).collect();
+            let which = c.default_pipeline.as_deref().unwrap_or("steps");
+            if named.is_empty() {
+                println!("config         ok ({n} steps)");
+            } else {
+                println!(
+                    "config         ok (default `{which}`: {n} steps; pipelines: {})",
+                    named.join(", ")
+                );
+            }
+        }
         Err(e) if path.exists() => {
             println!("config         INVALID: {e:#}");
             problems += 1;
