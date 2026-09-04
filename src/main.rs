@@ -82,6 +82,9 @@ enum Cmd {
         /// Open even though a run is still in progress.
         #[arg(long)]
         force: bool,
+        /// Wait for the run to finish, then open its session.
+        #[arg(long)]
+        wait: bool,
         /// Agent role to open (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
@@ -464,6 +467,7 @@ fn real_main() -> Result<()> {
             path: path_only,
             new,
             force,
+            wait,
             agent,
         } => {
             let st = Stacks::load(&root)?;
@@ -500,15 +504,26 @@ fn real_main() -> Result<()> {
             // open, so attaching mid-run gives "No conversation found to
             // continue" rather than the session you wanted.
             if let Some(pid) = running_pid(&root, &entry.branch) {
-                if !force {
+                if wait {
+                    println!("waiting for the run on `{}` to finish (pid {pid})...", entry.branch);
+                    while running_pid(&root, &entry.branch).is_some() {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    println!("run finished");
+                } else if !force {
                     bail!(
-                        "`{}` is still running (pid {pid}). Watch it with `rigg logs {} -f`, \
-                         or pass --force to open a separate session alongside it.",
+                        "`{}` is still running (pid {pid}).\n  \
+                         rigg logs {} -f        watch it\n  \
+                         rigg attach {} --wait  open it as soon as it finishes\n  \
+                         rigg attach {} --force open a second session alongside it",
+                        entry.branch,
+                        entry.branch,
                         entry.branch,
                         entry.branch
                     );
+                } else {
+                    println!("warning: a run is still in progress (pid {pid})");
                 }
-                println!("warning: a run is still in progress (pid {pid})");
             }
 
             let cfg = Config::load(std::path::Path::new(&dir), None)?;
@@ -760,6 +775,20 @@ fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> 
         .join(format!("{}.log", branch.replace('/', "-"))))
 }
 
+/// The first step that would stop to ask something, if any.
+fn confirm_step(
+    root: &std::path::Path,
+    cfg_path: Option<&str>,
+    pipeline: Option<&str>,
+) -> Option<String> {
+    let cfg = Config::load(root, cfg_path).ok()?;
+    cfg.steps_for(pipeline)
+        .ok()?
+        .into_iter()
+        .find(|s| s.confirm)
+        .map(|s| s.id)
+}
+
 /// Run the pipeline in the background so the terminal comes straight back.
 fn start_detached(
     root: &std::path::Path,
@@ -767,6 +796,12 @@ fn start_detached(
     branch: &str,
     o: RunOpts,
 ) -> Result<()> {
+    if let Some(id) = confirm_step(root, None, o.pipeline.as_deref()) {
+        bail!(
+            "step `{id}` asks for confirmation, which a detached run cannot do. \
+             Run it with --fg, or drop `confirm` from that step."
+        );
+    }
     let log = log_path(root, branch)?;
     if let Some(p) = log.parent() {
         std::fs::create_dir_all(p)?;

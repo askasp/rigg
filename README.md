@@ -54,6 +54,9 @@ rigg logs billing -f              # follow a run
 rigg stack names                  # for shell completion
 ```
 
+A step marked `confirm` cannot run detached - there is no terminal to answer it -
+so `new` and `add` say so up front rather than skipping the step silently.
+
 `new` and `add` return the terminal immediately and run the pipeline detached,
 logging to `.git/rigg/logs/<branch>.log`; pass `--fg` to run in the terminal
 instead. Given a single argument that reads like a sentence, `new` treats it as
@@ -63,9 +66,10 @@ the task and generates a stack name.
 there; `say` continues the agent session in that stack's tip rather than running
 a pipeline. `attach` opens an interactive agent on the stack's checkout, resuming the
 session the pipeline was using (`--continue`), so you can take over by hand. It
-refuses while a run is still in flight - claude will not resume a conversation
-its own process still has open - so watch that with `rigg logs -f` and attach
-once it finishes, or `--force` to open a separate session alongside it. Stacks
+refuses while a run is still in flight - a headless step owns its conversation
+for as long as it runs, and claude will not resume one another process still has
+open. Use `rigg logs -f` to watch, `--wait` to open the session the moment the
+run finishes, or `--force` to start a second session alongside it. Stacks
 with a run in flight are marked `[running]` by `rigg stack list`.
 `--new` starts a fresh session instead, `--path` only prints the directory, and
 under herdr it focuses the existing workspace rather than starting a second

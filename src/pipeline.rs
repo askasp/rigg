@@ -123,7 +123,15 @@ impl Runner {
         print!("  run step `{}`? [y/N] ", step.id);
         std::io::stdout().flush()?;
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        // With no terminal the read returns EOF immediately. Treating that as
+        // "no" would silently skip the step and report it as the user's choice.
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            bail!(
+                "step `{}` asks for confirmation but there is no terminal to ask. \
+                 Run with --fg, or drop `confirm` from the step.",
+                step.id
+            );
+        }
         Ok(matches!(line.trim(), "y" | "Y" | "yes"))
     }
 
