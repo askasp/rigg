@@ -103,8 +103,9 @@ loaded in the current shell.
 | `^X a` | attach to a stack |
 | `^X l` | follow a run's log |
 | `^X s` | list stacks, keeping what you were typing |
+| `^X r` | remove a stack |
 
-Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`.
+Aliases: `rn`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
 
 `say` with no arguments picks a stack and then asks what to send, the same shape
 as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
