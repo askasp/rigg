@@ -498,6 +498,19 @@ takes `-m/--model` instead, so carrying them across would produce an agent that
 cannot start. A role you switch often is better written out twice in the config,
 with the right flags on each.
 
+## Asking about the code
+
+```sh
+rigg ask "where is the revenue figure computed?"
+rigg ask --new "..."        # a fresh conversation rather than carrying one on
+```
+
+No branch, no worktree, no pipeline. It runs one turn in the repo you are in,
+with the agent put in a read-only mode - `--permission-mode plan` for claude -
+and its configured `args` dropped, since those exist to let it edit unattended
+and that is the opposite of what a question wants. A role with its own
+`command` cannot be made read-only that way, and says so.
+
 ## Reporting progress
 
 ```toml

@@ -202,6 +202,17 @@ enum Cmd {
         #[arg(short, long)]
         follow: bool,
     },
+    /// Ask a question about the code. Changes nothing, makes no branch.
+    Ask {
+        /// The question. Prompted for if omitted.
+        question: Option<String>,
+        /// Start a fresh conversation instead of carrying the last one on.
+        #[arg(long)]
+        new: bool,
+        /// Agent role (default: the first one configured).
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Show the branch and stack state.
     Status,
     /// Print the pipeline names, one per line.
@@ -670,6 +681,55 @@ fn real_main() -> Result<()> {
             } else {
                 start_detached(&root, dirp, &entry.branch, opts)?;
             }
+        }
+
+        Cmd::Ask { question, new, agent } => {
+            let question = match question {
+                Some(q) => q,
+                None => ask("ask> ").context("nothing asked")?,
+            };
+            let mut cfg = Config::load(&root, cli.config.as_deref())?;
+            let role = match agent {
+                Some(r) => r,
+                None => cfg.agents.keys().next().cloned().context("no agents configured")?,
+            };
+            let acfg = cfg
+                .agents
+                .get_mut(&role)
+                .with_context(|| format!("no agent role `{role}`"))?;
+            // A question is not a task: the configured args exist to let an
+            // agent edit unattended, which is the opposite of what is wanted
+            // here. `plan` is claude's read-only mode; an agent given a
+            // `command` is left alone, since rigg cannot know what is safe in
+            // someone else's argv.
+            if acfg.command.is_some() {
+                println!(
+                    "warning: role `{role}` has its own `command`, so this cannot be \
+                     made read-only. Ask it not to change anything."
+                );
+            } else {
+                acfg.args = match acfg.kind.as_str() {
+                    "claude" => vec!["--permission-mode".into(), "plan".into()],
+                    _ => Vec::new(),
+                };
+            }
+
+            let mut vars = BTreeMap::new();
+            vars.insert("repo".into(), root.to_string_lossy().to_string());
+            vars.insert("branch".into(), util::current_branch(&root).unwrap_or_default());
+            let step = config::Step {
+                id: "ask".into(),
+                agent: Some(role),
+                // `clear` means "do not resume", so a fresh conversation is
+                // what --new asks for.
+                clear: new,
+                prompt: Some(format!(
+                    "Answer this question about the code. Do not change any files, \
+                     and do not commit anything - this is a question.\n\n{question}"
+                )),
+                ..Default::default()
+            };
+            pipeline::Runner::new(root.clone(), cfg, vars, false).run(&[step])?;
         }
 
         Cmd::Stop { target } => {

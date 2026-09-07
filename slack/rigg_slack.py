@@ -46,6 +46,9 @@ HELP_GROUPS = [
         ("continue <stack> +part", "take it further, e.g. `continue foo +copilot`"),
         ("retry <stack> [step]", "run the same thing again"),
     ]),
+    ("Ask about the code", [
+        ("ask <question>", "no branch, nothing changed — reply in the thread to go on"),
+    ]),
     ("Have a look", [
         ("stacks", "one message per stack — reply in one to talk to it"),
         ("summary <stack>", "ask it what it did, what was wrong, and what is left"),
@@ -714,6 +717,32 @@ def chunks(text: str, size: int) -> list[str]:
     return out or [text[:size]]
 
 
+def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
+            in_thread: bool = False) -> None:
+    """A question about the code: no branch, no worktree, nothing changed.
+
+    A new message starts a fresh conversation and a reply inside its thread
+    carries that one on, which is how Slack already reads - so nobody has to
+    learn a flag for it.
+    """
+    if not rest:
+        say("`ask <question>` — about the code; nothing is changed")
+        return
+    args = ["ask", rest]
+    if not in_thread:
+        args.append("--new")
+    code, out = run_rigg(repo, args, timeout=1800)
+    if code != 0:
+        say(f"could not ask:\n```\n{out[-1500:]}\n```")
+        return
+    text = agent_text(out)
+    if not text:
+        say(f"```\n{out[-1500:]}\n```")
+        return
+    for part in chunks(text, 3500):
+        say(part)
+
+
 def cmd_summary(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     """Ask the agent what it has done and what is left.
 
@@ -1038,6 +1067,8 @@ COMMANDS = {
     "retry": cmd_retry,
     "continue": cmd_continue,
     "summary": cmd_summary,
+    "ask": cmd_ask,
+    "q": cmd_ask,
     "urls": cmd_urls,
     "rm": cmd_rm,
     "remove": cmd_rm,
@@ -1253,7 +1284,10 @@ def main() -> int:
 
         def work():
             try:  # noqa: SIM105
-                if fn in (cmd_new, cmd_add, cmd_say):
+                if fn is cmd_ask:
+                    fn(channel.repo, name, rest, reply, event["channel"],
+                       bool(event.get("thread_ts")))
+                elif fn in (cmd_new, cmd_add, cmd_say):
                     fn(channel.repo, name, rest, reply, event["channel"],
                        pipeline, images)
                 else:

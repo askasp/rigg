@@ -37,6 +37,17 @@ review found, and hands back a URL to look at. Everything below is optional.
 | `continue <stack> +part` | take it further than it was started with |
 | `retry <stack> [step]` | run the same thing again |
 
+**Ask about the code**
+
+| | |
+| --- | --- |
+| `ask <question>` | answered from the repo; no branch, nothing changed (`q`) |
+
+A question is not a task, so `ask` makes no stack, no worktree and no PR — it
+answers in the main checkout with the agent in a read-only mode, and the
+checkout is untouched afterwards. A new message starts a fresh conversation; a
+reply inside its thread carries that one on, which is how Slack already reads.
+
 **Have a look**
 
 | | |
