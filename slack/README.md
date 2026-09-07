@@ -108,6 +108,10 @@ live in the preview the moment it lands, so leaving the PR behind would mean
 the visible thing and the reviewable thing quietly disagree. End with `-push`
 to change the branch without pushing.
 
+So is anything a run leaves behind. `continue +copilot` applies the review
+after the branch has already been pushed, so without this the fixes sat in the
+checkout - live in the preview, absent from the PR - and nothing said so.
+
 ### Changing one run
 
 Put any of these on the end of a task, in any order:

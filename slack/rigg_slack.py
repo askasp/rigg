@@ -708,8 +708,8 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
     say(f"passing that to `{stack}`...")
     # A turn takes as long as it takes; the ack above is what keeps Slack happy.
     args = ["say", stack, message] + image_args(images or [])
-    if push:
-        args.append("--push")
+    if not push:
+        args.append("--no-push")
     code, out = run_rigg(repo, args, timeout=3600)
     tail = "\n".join(out.splitlines()[-25:])
     head = f"*{'Done' if code == 0 else 'Failed'}* — `{stack}`"

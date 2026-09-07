@@ -181,9 +181,11 @@ enum Cmd {
         /// Agent role (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
-        /// Commit and push whatever the turn changed, so it reaches the PR.
+        /// Leave the change in the branch instead of committing and pushing
+        /// it. Pushing is the default: the branch is looked at through a
+        /// preview and reviewed as a PR, and an unpushed change is in neither.
         #[arg(long)]
-        push: bool,
+        no_push: bool,
         /// Attach an image file to the message. Repeatable.
         #[arg(long = "image", value_name = "PATH")]
         images: Vec<String>,
@@ -1155,7 +1157,7 @@ fn real_main() -> Result<()> {
             target,
             message,
             agent,
-            push,
+            no_push,
             images,
             no_paste,
         } => {
@@ -1215,7 +1217,7 @@ fn real_main() -> Result<()> {
             );
             outcome?;
 
-            if push {
+            if !no_push {
                 push_changes(&dir, &entry.branch, &message_for_commit)?;
             }
         }
@@ -2278,8 +2280,36 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     for (i, line) in wrap(task.trim(), 68).into_iter().enumerate() {
         println!("{}  {line}", if i == 0 { "task" } else { "    " });
     }
+    // Read off before the config is handed to the runner.
+    let push_when_done = cfg.stack.push_when_done;
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run);
-    let outcome = runner.run(&steps);
+    let mut outcome = runner.run(&steps);
+
+    // Whatever the run left in the checkout is committed and pushed. A branch
+    // is looked at somewhere else - a preview mounts the checkout, a PR is
+    // what gets reviewed - so a pipeline that applies a review after it has
+    // already pushed leaves the fixes in neither, and nothing says so.
+    //
+    // Only a branch rigg is managing: `rigg run` in a checkout of your own
+    // should not commit what is lying around in it.
+    let managed = st.find(&branch).is_some();
+    if outcome.is_ok() && push_when_done && !o.dry_run && managed && branch != base {
+        let dirty = util::git(root, &["status", "--porcelain"])
+            .map(|o| !o.trim().is_empty())
+            .unwrap_or(false);
+        if dirty {
+            // The task names what the run was for; where there is none - a
+            // `continue` that only applies a review - the step that left the
+            // work names it better than anything else available.
+            let subject = match task.lines().find(|l| !l.trim().is_empty()) {
+                Some(l) => l.to_string(),
+                None => runner.at.clone().unwrap_or_else(|| "follow-up".into()),
+            };
+            println!();
+            outcome = push_changes(root, &branch, &subject);
+        }
+    }
+
     if !o.dry_run {
         // Where it got to, recorded rather than left to be read back out of a
         // log - which a foreground run does not even write.
@@ -2548,6 +2578,12 @@ fn push_changes(dir: &std::path::Path, branch: &str, message: &str) -> Result<()
     println!("committing {} change(s)", changed.lines().count());
     util::git(dir, &["add", "-A"])?;
     util::git(dir, &["commit", "-m", &subject])?;
+    // A repo with no remote is not a failure to push, it is nothing to push
+    // to. The commit is still the right thing to have made.
+    if util::git(dir, &["remote"]).map(|o| o.trim().is_empty()).unwrap_or(true) {
+        println!("no remote to push to; committed on {branch}");
+        return Ok(());
+    }
     util::git(dir, &["push", "-u", "origin", branch])?;
     println!("pushed {branch}");
     Ok(())

@@ -178,6 +178,18 @@ pub struct StackCfg {
     /// not stop the removal that was asked for.
     #[serde(default)]
     pub teardown: Option<String>,
+    /// Commit and push whatever a run leaves in the checkout when it finishes.
+    ///
+    /// On, because a branch is worked on somewhere else - a preview mounts the
+    /// checkout, a PR is what gets reviewed - and a change that was not pushed
+    /// is in neither. A pipeline that applies a review after it has pushed
+    /// leaves the fixes behind otherwise, and nothing says so.
+    #[serde(default = "yes")]
+    pub push_when_done: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for StackCfg {
@@ -188,6 +200,7 @@ impl Default for StackCfg {
             frontend_paths: Vec::new(),
             worktree_dir: None,
             teardown: None,
+            push_when_done: true,
         }
     }
 }

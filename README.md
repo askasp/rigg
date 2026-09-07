@@ -112,8 +112,31 @@ loaded in the current shell.
 
 Aliases: `rn`, `rad`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
 
-`say --push` commits and pushes whatever the turn changed, using the request as
-the commit subject, so a follow-up reaches the PR without a second command.
+### Finishing means pushed
+
+Whatever a run leaves in the checkout is committed and pushed when it finishes.
+A branch is looked at somewhere other than the checkout - a preview mounts it, a
+PR is what gets reviewed - so a change that was not pushed is in neither, and
+nothing says so. A pipeline that applies a review *after* it has pushed is the
+usual way to end up with one:
+
+```
+---- [6/6] apply-copilot-review ---------------------------- 21:01:51
+  ok (14s)
+
+committing 1 change(s)
+pushed billing
+```
+
+The task is the commit subject; where there is none - a `continue` that only
+applies a review - the step that left the work is. It only touches a branch
+rigg is managing, so `rigg run` in a checkout of your own does not commit what
+is lying around in it, and a repo with no remote is committed and said so
+rather than failed. `[stack] push_when_done = false` turns it off.
+
+`say` is the same: it commits and pushes whatever the turn changed, using the
+request as the commit subject, so a follow-up reaches the PR without a second
+command. `--no-push` leaves it in the branch.
 
 ### Images
 
