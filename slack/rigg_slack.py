@@ -21,6 +21,7 @@ import string
 import shutil
 import subprocess
 import sys
+import traceback
 import tempfile
 import urllib.error
 import urllib.request
@@ -221,6 +222,19 @@ def git_common_dir(repo: Path) -> Path:
         cwd=repo, capture_output=True, text=True,
     )
     return Path(out.stdout.strip())
+
+
+def ts_of(posted: object) -> str | None:
+    """The timestamp of a message just posted, whatever `say` handed back.
+
+    Bolt returns a SlackResponse, which is dict-*like* but not a dict - so an
+    isinstance check against dict quietly produced None, and not one of the
+    threads this was meant to record ever was.
+    """
+    try:
+        return posted.get("ts")  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        return None
 
 
 def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str,
@@ -500,7 +514,7 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
         say(f"could not start `{stack}`:\n```\n{out[:2500]}\n```")
         return
     posted = say(f"started `{stack}`\n```\n{out[:1500]}\n```")
-    ts = posted.get("ts") if isinstance(posted, dict) else None
+    ts = ts_of(posted)
     if ts:
         remember_thread(repo, stack, channel, ts)
 
@@ -556,7 +570,7 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str,
         return
     branch = first_backticked(out) or stack
     posted = say(f"queued `{branch}`\n```\n{out[:1500]}\n```")
-    ts = posted.get("ts") if isinstance(posted, dict) else None
+    ts = ts_of(posted)
     if ts:
         remember_thread(repo, branch, channel, ts)
 
@@ -692,7 +706,7 @@ def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
                  ("restarted" if code == 0 else "failed"))
     # So the run reports back here, which it cannot do for a branch that was
     # started from a terminal and has no thread recorded.
-    ts = posted.get("ts") if isinstance(posted, dict) else None
+    ts = ts_of(posted)
     if ts and code == 0:
         remember_thread(repo, stack, channel, ts)
 
@@ -744,7 +758,7 @@ def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     posted = say(f"```\n{out[:1500]}\n```" if out else
                  ("continuing" if code == 0 else "could not continue it"))
     # Point progress at this thread, so the answer lands where it was asked.
-    ts = posted.get("ts") if isinstance(posted, dict) else None
+    ts = ts_of(posted)
     if ts and code == 0:
         remember_thread(repo, stack, channel, ts)
 
@@ -824,7 +838,7 @@ def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         # The channel carries names only. Everything else goes one level down,
         # so a listing stays glanceable however many stacks there are.
         posted = say(f"*{short}*")
-        ts = posted.get("ts") if isinstance(posted, dict) else None
+        ts = ts_of(posted)
         if not ts:
             continue
         # Not primary: a listing should give this stack somewhere to be
@@ -1090,12 +1104,21 @@ def main() -> int:
                     rest = f"{in_thread.split('/', 1)[1]} {rest}".strip()
 
         def work():
-            try:
+            try:  # noqa: SIM105
                 if fn in (cmd_new, cmd_add, cmd_say):
                     fn(channel.repo, name, rest, reply, event["channel"],
                        pipeline, images)
                 else:
                     fn(channel.repo, name, rest, reply, event["channel"])
+            except Exception:
+                # A discarded Future swallows this entirely: the command
+                # simply stops half-done and nothing anywhere says why.
+                detail = traceback.format_exc()
+                print(detail, file=sys.stderr)
+                try:
+                    reply(f"that failed:\n```\n{detail.strip().splitlines()[-1][:400]}\n```")
+                except Exception:
+                    pass
             finally:
                 # rigg copies them into its own staging while it runs, so they
                 # are only needed for the length of the call.
