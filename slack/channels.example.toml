@@ -1,0 +1,15 @@
+# Which repository each Slack channel drives. Keyed by channel name, no '#'.
+#
+# Stacks a channel starts are named <channel>/<slug>, so two channels can share
+# a repo without colliding, and each sees only its own stacks.
+
+[channels.amino]
+repo = "~/git/amino-monorepo"
+
+[channels.rigg-dev]
+repo = "~/git/rigg"
+
+# Slack user IDs allowed to drive an agent. A message here becomes a prompt for
+# an agent running with bypassPermissions, so this is the list of people who may
+# execute code on this machine. Leave it out and everyone in the channel can.
+# allowed_users = ["U01ABCDEFG"]
