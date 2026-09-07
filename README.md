@@ -67,7 +67,20 @@ It resumes by session id and prints which one, rather than relying on
 `--continue`, and says plainly when a checkout has no previous session instead
 of leaving claude to report that it found nothing.
 
-`--new` starts a fresh session instead, and `--path` only prints the directory.
+`--new` starts a fresh session instead, and `--path` only prints the directory —
+which is what `rcd` uses to put you in a stack's checkout:
+
+```sh
+rcd billing        # cd to that stack's worktree
+```
+
+Worktrees live in `~/.rigg/worktrees/<repo>/<branch>`, with any `/` in the
+branch flattened to `-`; `[stack] worktree_dir` moves that elsewhere.
+
+Any unambiguous part of a name will do, here and everywhere a stack is named:
+`rcd in-b2b` finds `rigg-tasks/in-b2b-dashboard-in-fd4`. A prefix is tried
+before a substring, and an ambiguous fragment says what it matched rather than
+guessing.
 
 A branch name resolves to itself. A stack name resolves to the branch you most
 likely mean - the one being worked on now, else the newest that exists on disk -
