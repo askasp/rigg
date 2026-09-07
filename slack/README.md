@@ -49,7 +49,11 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `rm <stack>` | what removing it would do |
 | `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
 
-End a task with `with opencode` (or `on codex`, `using claude`) to run it on a
+End a task with `effort=high` to set a prompt placeholder — several are fine,
+and they are only taken off the end, so "set FOO=bar in the config" stays a
+task.
+
+End it with `with opencode` (or `on codex`, `using claude`) to run it on a
 different agent — `claude`, `opencode`, `codex` and `gemini` are recognised
 there, and nothing else is, so "make it work with caching" stays a task.
 

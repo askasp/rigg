@@ -293,6 +293,18 @@ run = "./dev.sh quick -d"
 sitting between `push-and-pr` and `wait-copilot` — placement matters when the
 step it would otherwise follow waits 20 minutes for a review.
 
+`without` drops inherited steps by id, which is what lets the fuller pipeline
+be the one written down and the shorter one say what it leaves out:
+
+```toml
+[pipelines.full]
+extends = "full-preview"
+without = ["preview-up", "preview-url"]
+```
+
+Between them, a chain of five pipelines can share every step definition rather
+than any of them being written twice.
+
 `extends` chains, so a pipeline may extend one that itself extends another. A
 cycle, an `insert_after` that names no inherited step, and two steps ending up
 with the same id are all config errors caught by `rigg doctor` rather than
@@ -375,6 +387,25 @@ command = ["my-agent", "--print", "{{prompt}}"]
 
 A `command` is used verbatim — rigg adds no continue flag to it, so put one in
 the template if the tool has one.
+
+## Prompt settings
+
+A prompt can use placeholders beyond `{{task}}`, `{{branch}}`, `{{base}}` and
+`{{repo}}`. Give them defaults in the config, and override one for a single
+run:
+
+```toml
+[vars]
+effort = "medium"
+```
+
+```sh
+rigg run --var effort=high
+rigg new billing "..." --var effort=max
+```
+
+The default matters: an unset placeholder is left in the prompt verbatim, so
+`{{effort}}` with nothing behind it reaches the agent as those ten characters.
 
 ## Running on another agent
 

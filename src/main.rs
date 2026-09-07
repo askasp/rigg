@@ -56,6 +56,10 @@ enum Cmd {
         /// role, `--agent reviewer=opencode` swaps one. Repeatable.
         #[arg(long = "agent", value_name = "[ROLE=]KIND")]
         agents: Vec<String>,
+        /// Set a prompt placeholder for this run: `--var effort=high` fills
+        /// {{effort}}. Repeatable; overrides [vars] in the config.
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -82,6 +86,10 @@ enum Cmd {
         /// role, `--agent reviewer=opencode` swaps one. Repeatable.
         #[arg(long = "agent", value_name = "[ROLE=]KIND")]
         agents: Vec<String>,
+        /// Set a prompt placeholder for this run: `--var effort=high` fills
+        /// {{effort}}. Repeatable; overrides [vars] in the config.
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -153,6 +161,10 @@ enum Cmd {
         /// role, `--agent reviewer=opencode` swaps one. Repeatable.
         #[arg(long = "agent", value_name = "[ROLE=]KIND")]
         agents: Vec<String>,
+        /// Set a prompt placeholder for this run: `--var effort=high` fills
+        /// {{effort}}. Repeatable; overrides [vars] in the config.
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
         /// Run in the background and return, as `new` and `add` do.
         #[arg(long)]
         detach: bool,
@@ -458,9 +470,11 @@ fn real_main() -> Result<()> {
             only,
             dry_run,
             agents,
+            vars,
             detach,
         } => {
-            let opts = RunOpts { pipeline, task, base, from, only, dry_run, agents };
+            let opts =
+                RunOpts { pipeline, task, base, from, only, dry_run, agents, vars };
             if detach {
                 let branch = util::current_branch(&root)?;
                 start_detached(&root, &root, &branch, opts)?;
@@ -492,6 +506,7 @@ fn real_main() -> Result<()> {
             images,
             no_paste,
             agents,
+            vars,
             fg,
         } => {
             let _ = &name;
@@ -512,7 +527,8 @@ fn real_main() -> Result<()> {
             // The branch a new stack starts is named after the stack itself.
             media::collect(&root, &name, &images, !no_paste)?;
             let path = push_stack(&root, cli.config.as_deref(), &name, base, None, true)?;
-            let opts = RunOpts { pipeline, task: prompt, agents, ..Default::default() };
+            let opts =
+                RunOpts { pipeline, task: prompt, agents, vars, ..Default::default() };
             if fg {
                 execute(&path, None, opts)?;
             } else {
@@ -528,6 +544,7 @@ fn real_main() -> Result<()> {
             images,
             no_paste,
             agents,
+            vars,
             fg,
             worker,
         } => {
@@ -564,7 +581,7 @@ fn real_main() -> Result<()> {
             if !fg && !worker {
                 start_queued_add(
                     &root, &stack, &branch, prompt.as_deref(), pipeline.as_deref(),
-                    &agents,
+                    &agents, &vars,
                 )?;
                 return Ok(());
             }
@@ -630,7 +647,7 @@ fn real_main() -> Result<()> {
             execute(
                 std::path::Path::new(&path),
                 None,
-                RunOpts { pipeline, task: prompt, agents, ..Default::default() },
+                RunOpts { pipeline, task: prompt, agents, vars, ..Default::default() },
             )?;
         }
 
@@ -1159,6 +1176,7 @@ fn start_queued_add(
     prompt: Option<&str>,
     pipeline: Option<&str>,
     agents: &[String],
+    vars: &[String],
 ) -> Result<()> {
     if let Some(id) = confirm_step(root, None, pipeline) {
         bail!(
@@ -1206,6 +1224,10 @@ fn start_queued_add(
     for a in agents {
         args.push("--agent".into());
         args.push(a.clone());
+    }
+    for v in vars {
+        args.push("--var".into());
+        args.push(v.clone());
     }
     let mut cmd = if which("setsid") {
         let mut c = std::process::Command::new("setsid");
@@ -1288,6 +1310,10 @@ fn start_detached(
     for a in &o.agents {
         args.push("--agent".into());
         args.push(a.clone());
+    }
+    for v in &o.vars {
+        args.push("--var".into());
+        args.push(v.clone());
     }
     // setsid detaches from this terminal's session, so the run survives the
     // shell going away.
@@ -1513,6 +1539,7 @@ struct RunOpts {
     only: Vec<String>,
     dry_run: bool,
     agents: Vec<String>,
+    vars: Vec<String>,
 }
 
 /// Load the config, pick the pipeline and run it against `root`.
@@ -1568,7 +1595,15 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         media::decorate(&task, &attached)
     };
 
-    let mut vars = BTreeMap::new();
+    // Config defaults first, then this run's overrides, then the built-ins -
+    // which win, so `[vars] branch = ...` cannot shadow the real branch.
+    let mut vars = cfg.vars.clone();
+    for v in &o.vars {
+        let (k, val) = v
+            .split_once('=')
+            .with_context(|| format!("--var wants name=value, got `{v}`"))?;
+        vars.insert(k.to_string(), val.to_string());
+    }
     vars.insert("task".into(), task);
     vars.insert("branch".into(), branch.clone());
     vars.insert("base".into(), base.clone());

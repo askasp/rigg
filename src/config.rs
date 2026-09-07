@@ -22,6 +22,12 @@ pub struct Config {
     pub stack: StackCfg,
     #[serde(default)]
     pub notify: NotifyCfg,
+    /// Defaults for placeholders a prompt uses beyond the built-in {{task}},
+    /// {{branch}}, {{base}} and {{repo}} - `--var name=value` overrides one
+    /// for a single run. Having the default here is what lets a prompt written
+    /// against {{effort}} still work when nobody passes one.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
@@ -41,6 +47,11 @@ pub struct Pipeline {
     /// this id, rather than at the end. Only meaningful with `extends`.
     #[serde(default)]
     pub insert_after: Option<String>,
+    /// Inherited steps to leave out, by id. The counterpart to `extends`: it
+    /// lets the fuller pipeline be the one written down, and the shorter one
+    /// say what it drops, rather than either repeating the other.
+    #[serde(default)]
+    pub without: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -244,6 +255,19 @@ impl Config {
             Some(parent) => self.resolve_pipeline(parent, seen)?,
             None => Vec::new(),
         };
+
+        for id in &p.without {
+            let before = steps.len();
+            steps.retain(|s| &s.id != id);
+            if steps.len() == before {
+                let ids: Vec<&str> = steps.iter().map(|s| s.id.as_str()).collect();
+                bail!(
+                    "pipeline `{name}`: without = \"{id}\" names no inherited step; \
+                     it has {}",
+                    if ids.is_empty() { "none".into() } else { ids.join(", ") }
+                );
+            }
+        }
 
         match &p.insert_after {
             Some(id) => {

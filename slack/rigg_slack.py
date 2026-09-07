@@ -86,7 +86,8 @@ def help_for(channel: "Channel") -> str:
         lines += [f"`{c.ljust(width)}`  {d}" for c, d in rows]
 
     lines.append(
-        "\nEnd a task with `with opencode` to run it on another agent."
+        "\nEnd a task with `with opencode` to use another agent, or "
+        "`effort=high` to set a prompt setting. Both together is fine."
     )
     lines.append(
         "\nStacks here are named `%s/<slug>` and belong to this channel — "
@@ -297,6 +298,37 @@ def agent_args(kind: str | None) -> list[str]:
     return ["--agent", kind] if kind else []
 
 
+def split_vars(text: str) -> tuple[str, list[str]]:
+    """Peel trailing `name=value` settings off a task.
+
+    Only from the end, and only while they keep matching, so an `=` inside the
+    task itself is left alone.
+    """
+    words = text.split()
+    found: list[str] = []
+    while len(words) > 1 and re.fullmatch(r"[a-zA-Z_][\w-]*=\S+", words[-1]):
+        found.insert(0, words.pop())
+    return " ".join(words), found
+
+
+def var_args(vars: list[str]) -> list[str]:
+    out: list[str] = []
+    for v in vars:
+        out += ["--var", v]
+    return out
+
+
+def split_modifiers(text: str) -> tuple[str, list[str]]:
+    """Strip `effort=high` and `with opencode` off the end, in either order."""
+    args: list[str] = []
+    for _ in range(2):
+        text, kind = split_agent(text)
+        args += agent_args(kind)
+        text, found = split_vars(text)
+        args += var_args(found)
+    return text, args
+
+
 def image_args(images: list[str]) -> list[str]:
     """rigg flags for attached images.
 
@@ -370,9 +402,9 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
     if not rest and not images:
         say("give me a task: `new <task>`")
         return
-    rest, kind = split_agent(rest)
+    rest, mods = split_modifiers(rest)
     stack = f"{prefix}/{slug(rest or 'from an image')}"
-    args = ["new", stack, rest] + image_args(images) + agent_args(kind)
+    args = ["new", stack, rest] + image_args(images) + mods
     if pipeline:
         args += ["--pipeline", pipeline]
     code, out = run_rigg(repo, args)
@@ -404,10 +436,8 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str,
     stack = resolve(repo, prefix, short, say)
     if stack is None:
         return
-    task, kind = split_agent(task)
-    code, out = run_rigg(
-        repo, ["add", stack, task] + image_args(images or []) + agent_args(kind)
-    )
+    task, mods = split_modifiers(task)
+    code, out = run_rigg(repo, ["add", stack, task] + image_args(images or []) + mods)
     if code != 0:
         say(f"could not extend `{stack}`:\n```\n{out[:2500]}\n```")
         return
