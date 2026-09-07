@@ -1145,8 +1145,35 @@ def branch_state(line: str) -> tuple[str, str]:
     return branch, state
 
 
+def ever_committed(repo: Path, branch: str) -> bool:
+    """Whether a branch has ever had a commit of its own.
+
+    A branch that committed nothing sits exactly where it was cut from, which
+    is a commit on the trunk - so `merge-base --is-ancestor` calls it merged
+    and a listing clears away a stack that has done nothing. A question asked
+    as a task is the usual way to get one.
+
+    The reflog is what remembers where a branch started. Where it cannot say,
+    this answers no and the stack is left alone: not removing something is the
+    safe way to be wrong.
+    """
+    out = subprocess.run(
+        ["git", "reflog", "show", "--format=%H", branch],
+        cwd=repo, capture_output=True, text=True,
+    )
+    shas = out.stdout.split()
+    # Oldest entry is where the branch was created; anything above it is work.
+    return out.returncode == 0 and len(shas) > 1 and shas[0] != shas[-1]
+
+
 def merged_into_trunk(repo: Path, branch: str) -> bool:
-    """Whether a branch is already contained in the trunk."""
+    """Whether a branch's work is already contained in the trunk.
+
+    Its *work*. A branch that never committed is contained in the trunk as
+    well, trivially, and clearing that away is not the same thing at all.
+    """
+    if not ever_committed(repo, branch):
+        return False
     for trunk in ("origin/main", "main"):
         r = subprocess.run(
             ["git", "merge-base", "--is-ancestor", branch, trunk],

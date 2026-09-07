@@ -131,6 +131,25 @@ pub fn git_worktree_checkout(
     Ok(())
 }
 
+/// Whether a branch has ever had a commit of its own.
+///
+/// A branch that committed nothing sits exactly where it was cut from, which
+/// is a commit on the trunk - so `merge-base --is-ancestor` calls it merged,
+/// and it would be pruned as landed work when it has landed nothing. A run
+/// that changed nothing, or was asked a question rather than given a task,
+/// leaves one behind.
+///
+/// The reflog is what remembers where a branch started. Where it cannot say,
+/// this answers no: not removing something is the safe way to be wrong.
+pub fn ever_committed(root: &std::path::Path, branch: &str) -> bool {
+    let Ok(out) = git(root, &["reflog", "show", "--format=%H", branch]) else {
+        return false;
+    };
+    let shas: Vec<&str> = out.split_whitespace().collect();
+    // The oldest entry is where the branch was created; anything above is work.
+    shas.len() > 1 && shas.first() != shas.last()
+}
+
 /// The remote-tracking ref for a branch that has no local ref yet, if exactly
 /// one remote has it. Two remotes carrying the same name is a question rather
 /// than something to guess at, so that returns nothing.

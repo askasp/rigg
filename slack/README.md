@@ -160,7 +160,9 @@ arrives carrying it - which is why this used to work only in the threads
 
 A listing leaves out any stack in this channel whose every branch has landed
 on the trunk — a merged stack is finished with, and the next piece of work
-wants a new one. It names them as going and removes them behind you: each goes
+wants a new one. Landed means its *work* is on the trunk: a branch that never
+committed is contained in the trunk as well, trivially, so a stack that only
+answered a question stays where it is rather than being cleared as finished. It names them as going and removes them behind you: each goes
 through its own teardown, which stops a dev stack and its tunnels and takes
 tens of seconds, so waiting for it would make a listing something you avoid
 running. A stack with a run in flight is never touched.

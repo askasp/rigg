@@ -2702,11 +2702,15 @@ fn prune(
             if p == main_checkout || p == here {
                 continue;
             }
-            let merged = util::git(
-                root,
-                &["merge-base", "--is-ancestor", &format!("refs/heads/{branch}"), &base],
-            )
-            .is_ok();
+            // Its *work* has to be on the trunk. A branch that never
+            // committed is contained in the trunk as well, trivially, and
+            // pruning that as landed work is not the same thing at all.
+            let merged = util::ever_committed(root, &branch)
+                && util::git(
+                    root,
+                    &["merge-base", "--is-ancestor", &format!("refs/heads/{branch}"), &base],
+                )
+                .is_ok();
             if !merged {
                 continue;
             }
