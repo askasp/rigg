@@ -85,8 +85,17 @@ They are only taken off the end, and `+x` / `-x` only when they look like a
 part — so "make the button 2+2 wide" and "set FOO=bar in the config" stay
 tasks.
 
-Stacks are referred to by their short name — `add proration-e4f "..."`, not the
-full `billing/proration-e4f`.
+### Naming a stack
+
+Any unambiguous part of the name will do — `say in-b2b ...` reaches
+`in-b2b-dashboard-in-fd4`, matching a prefix first and then anywhere in the
+name, since the random suffix is not something to read back. An ambiguous
+fragment says what it matched.
+
+Better still, **reply in the stack's own thread and leave the name out**:
+`@rigg say make the bars blue` works there, because the thread is already
+where that branch reports. That applies to `add`, `say`, `stop`, `retry`,
+`continue`, `urls`, `logs` and `rm`.
 
 ## Channels, and who is allowed
 

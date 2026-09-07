@@ -232,8 +232,31 @@ def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str) -> No
     d = git_common_dir(repo) / "rigg" / "slack"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{branch.replace('/', '-')}.json").write_text(
-        json.dumps({"channel": channel, "thread_ts": thread_ts})
+        # The branch is stored as well as being the filename, because the
+        # filename flattens its slash and cannot be turned back.
+        json.dumps({"channel": channel, "thread_ts": thread_ts, "branch": branch})
     )
+
+
+def stack_for_thread(repo: Path, channel: str, thread_ts: str | None) -> str | None:
+    """The stack whose progress is reported in this thread, if any.
+
+    Replying where a branch already reports is the clearest way of saying which
+    branch you mean, and costs no typing at all.
+    """
+    if not thread_ts:
+        return None
+    d = git_common_dir(repo) / "rigg" / "slack"
+    if not d.is_dir():
+        return None
+    for f in d.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if data.get("channel") == channel and data.get("thread_ts") == thread_ts:
+            return data.get("branch") or f.stem
+    return None
 
 
 def download_images(event: dict, token: str) -> tuple[list[str], str | None]:
@@ -456,12 +479,37 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
         remember_thread(repo, stack, channel, ts)
 
 
+def find_stack(repo: Path, prefix: str, short: str) -> tuple[str | None, str | None]:
+    """Match what was typed against this channel's stacks.
+
+    Exact first, then a prefix, then anywhere in the name - because the names
+    carry a random suffix nobody should have to read back, and `in-b2b` is how
+    a person refers to `in-b2b-dashboard-in-fd4`.
+    """
+    stacks = own_stacks(repo, prefix)
+    if not short:
+        return None, None
+    short = short[len(prefix) + 1:] if short.startswith(f"{prefix}/") else short
+    full = f"{prefix}/{short}"
+    if full in stacks:
+        return full, None
+    tails = {s: s.split("/", 1)[1] for s in stacks}
+    for test in (lambda t: t.startswith(short), lambda t: short in t):
+        hits = [s for s, t in tails.items() if test(t)]
+        if len(hits) == 1:
+            return hits[0], None
+        if len(hits) > 1:
+            names = ", ".join(f"`{tails[h]}`" for h in sorted(hits))
+            return None, f"`{short}` matches {names} — say which"
+    return None, None
+
+
 def resolve(repo: Path, prefix: str, short: str, say) -> str | None:
     """Turn a short name typed in Slack into this channel's full stack name."""
-    stack = short if short.startswith(f"{prefix}/") else f"{prefix}/{short}"
-    if stack in own_stacks(repo, prefix):
+    stack, ambiguous = find_stack(repo, prefix, short)
+    if stack:
         return stack
-    say(f"no stack `{short}` in this channel. `stacks` lists them.")
+    say(ambiguous or f"no stack `{short}` in this channel. `stacks` lists them.")
     return None
 
 
@@ -739,6 +787,11 @@ def cmd_logs(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     say(f"```\n{tail[:2800]}\n```" if tail.strip() else f"no log for `{stack}`")
 
 
+# Commands whose first word is a stack, and which therefore can take it from
+# the thread instead.
+STACK_FIRST = {"add", "say", "stop", "cancel", "retry", "continue", "urls",
+               "logs", "rm", "remove"}
+
 COMMANDS = {
     "new": cmd_new,
     "add": cmd_add,
@@ -948,6 +1001,18 @@ def main() -> int:
             # Threading every reply under the request keeps a channel with
             # several stacks in flight readable.
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
+
+        # A reply in a stack's own thread already says which stack, so the
+        # name does not have to be typed again.
+        if verb in STACK_FIRST:
+            first = rest.split(None, 1)[0] if rest else ""
+            found, _ = find_stack(channel.repo, name, first)
+            if not found:
+                in_thread = stack_for_thread(
+                    channel.repo, event["channel"], event.get("thread_ts")
+                )
+                if in_thread:
+                    rest = f"{in_thread.split('/', 1)[1]} {rest}".strip()
 
         def work():
             try:

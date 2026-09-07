@@ -996,7 +996,22 @@ fn real_main() -> Result<()> {
                 prompt: Some(message),
                 ..Default::default()
             };
-            pipeline::Runner::new(dir.clone(), cfg, vars, false).run(&[step])?;
+            // A say runs in the foreground and prints to whoever asked, so
+            // without this the branch's log still shows whatever the last
+            // detached run left - which reads as though the say never
+            // happened, or worse, failed for a reason belonging to that run.
+            let started = std::time::Instant::now();
+            note_in_log(&root, &entry.branch, &format!("say: {}", first_line(&message_for_commit)));
+            let outcome = pipeline::Runner::new(dir.clone(), cfg, vars, false).run(&[step]);
+            line_in_log(
+                &root,
+                &entry.branch,
+                &match &outcome {
+                    Ok(()) => format!("  ok ({}s)", started.elapsed().as_secs()),
+                    Err(e) => format!("  failed: {e}"),
+                },
+            );
+            outcome?;
 
             if push {
                 push_changes(&dir, &entry.branch, &message_for_commit)?;
@@ -1179,6 +1194,48 @@ fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
         }
     }
     resolve_target(root, st, &answer)
+}
+
+/// Append a line to a branch's run log, with a timestamp.
+///
+/// Used by the things that do work without being a detached run, so that
+/// `rigg logs` reflects everything that happened to a branch rather than only
+/// the last pipeline.
+fn note_in_log(root: &std::path::Path, branch: &str, text: &str) {
+    use std::io::Write;
+    let Ok(path) = log_path(root, branch) else { return };
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let stamp = std::process::Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "\n---- {text} ---- {stamp}");
+    }
+}
+
+/// Append a plain line, for an outcome rather than a heading.
+fn line_in_log(root: &std::path::Path, branch: &str, text: &str) {
+    use std::io::Write;
+    let Ok(path) = log_path(root, branch) else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{text}");
+    }
+}
+
+/// The first line of a string, for a log header.
+fn first_line(s: &str) -> String {
+    let line = s.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if line.chars().count() > 72 {
+        format!("{}...", line.chars().take(69).collect::<String>())
+    } else {
+        line.to_string()
+    }
 }
 
 /// Where the last attempted step id is kept for a branch.
