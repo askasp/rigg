@@ -842,6 +842,12 @@ def cmd_logs(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
 STACK_FIRST = {"add", "say", "stop", "cancel", "retry", "continue", "urls",
                "logs", "rm", "remove"}
 
+# Answered in the channel rather than in a thread. A listing exists to be
+# glanced at, and a message per stack is no use if all of them are folded
+# inside one thread that has to be opened first - and each needs to be
+# top-level anyway to have a thread of its own to be replied in.
+CHANNEL_LEVEL = {"stacks", "status", "list"}
+
 COMMANDS = {
     "new": cmd_new,
     "add": cmd_add,
@@ -1049,8 +1055,11 @@ def main() -> int:
             say(text=f"got {len(images)} image(s)", thread_ts=reply_ts)
 
         def reply(text: str):
-            # Threading every reply under the request keeps a channel with
-            # several stacks in flight readable.
+            # Threading keeps a channel with several stacks in flight
+            # readable; a listing is the exception, being the thing you look
+            # at to decide which thread to open.
+            if verb in CHANNEL_LEVEL:
+                return say(text=text)
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
 
         # A reply in a stack's own thread already says which stack, so the
