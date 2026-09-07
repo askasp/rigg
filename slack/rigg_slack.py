@@ -249,7 +249,19 @@ def main() -> int:
     if not bot_token or not app_token:
         raise SystemExit("set SLACK_BOT_TOKEN (xoxb-) and SLACK_APP_TOKEN (xapp-)")
 
-    app = App(token=bot_token)
+    # Bolt verifies the bot token here. Left alone it fails with a stack trace
+    # out of slack_sdk, which is a poor way to learn you pasted the wrong one.
+    try:
+        app = App(token=bot_token)
+    except Exception as e:
+        detail = str(e)
+        if "invalid_auth" in detail or "not_authed" in detail:
+            raise SystemExit(
+                "Slack rejected SLACK_BOT_TOKEN. It should start with `xoxb-` "
+                "and come from Install App -> Install to Workspace."
+            )
+        raise SystemExit(f"could not start: {detail}")
+
     pool = ThreadPoolExecutor(max_workers=4)
     names: dict[str, str] = {}
 
@@ -302,7 +314,17 @@ def main() -> int:
     if not cfg.allowed_users:
         print("WARNING: allowed_users is empty — anyone in these channels can "
               "run an agent on this machine.")
-    SocketModeHandler(app, app_token).start()
+    try:
+        SocketModeHandler(app, app_token).start()
+    except Exception as e:
+        detail = str(e)
+        if "invalid_auth" in detail or "not_authed" in detail:
+            raise SystemExit(
+                "Slack rejected SLACK_APP_TOKEN. It should start with `xapp-` "
+                "and come from Basic Information -> App-Level Tokens, with the "
+                "connections:write scope."
+            )
+        raise
     return 0
 
 

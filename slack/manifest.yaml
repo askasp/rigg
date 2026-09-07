@@ -1,0 +1,40 @@
+# Slack app manifest for the rigg bridge.
+# api.slack.com/apps -> Create New App -> From an app manifest -> paste this.
+#
+# It sets every scope and event the bridge needs. Two things still have to be
+# done by hand afterwards, because Slack will not mint tokens from a manifest:
+#   1. Basic Information -> App-Level Tokens -> Generate, scope connections:write
+#      (this is SLACK_APP_TOKEN, xapp-...)
+#   2. Install App -> Install to Workspace
+#      (this is SLACK_BOT_TOKEN, xoxb-...)
+display_information:
+  name: rigg
+  description: Runs rigg pipelines from a Slack channel
+  background_color: "#1d1f21"
+features:
+  bot_user:
+    display_name: rigg
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      # post replies
+      - chat:write
+      # see "@rigg ..." in a channel
+      - app_mentions:read
+      # resolve a channel id to its name, which is how a channel maps to a repo
+      - channels:read
+      - groups:read
+      # accept direct messages
+      - im:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: false
+  # No public URL, no webhook, no tunnel: the bridge dials out to Slack.
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

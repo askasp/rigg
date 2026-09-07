@@ -30,17 +30,17 @@ full `billing/proration-e4f`.
 
 ## Setting up the Slack app
 
-1. **Create the app** at <https://api.slack.com/apps> → *From scratch*.
-2. **Socket Mode** → enable it. That generates an **app-level token**
-   (`xapp-…`) with `connections:write`. Socket Mode is why this needs no public
-   URL, no tunnel and no webhook.
-3. **OAuth & Permissions** → bot token scopes:
-   `app_mentions:read`, `chat:write`, `channels:read`, `groups:read`,
-   `im:history`.
-4. **Event Subscriptions** → subscribe to bot events: `app_mention`,
-   `message.im`.
-5. **Install to Workspace** → gives the **bot token** (`xoxb-…`).
-6. In Slack, invite it to each channel: `/invite @rigg`.
+1. **Create the app** at <https://api.slack.com/apps> → *Create New App* →
+   *From an app manifest* → pick the workspace → paste `slack/manifest.yaml`.
+   That sets every scope and event in one go.
+2. **Basic Information → App-Level Tokens → Generate**, scope
+   `connections:write`. This is `SLACK_APP_TOKEN` (`xapp-…`). Slack will not
+   mint this from a manifest, so it has to be done here.
+3. **Install App → Install to Workspace**. This is `SLACK_BOT_TOKEN`
+   (`xoxb-…`).
+4. In Slack, invite the bot to each channel: `/invite @rigg`.
+5. Your own member ID, for `allowed_users`: click your avatar → *Profile* →
+   the ⋮ menu → *Copy member ID* (`U…`).
 
 ## Running it
 
