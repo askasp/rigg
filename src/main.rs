@@ -159,6 +159,8 @@ enum Cmd {
     },
     /// Show the branch and stack state.
     Status,
+    /// Print the pipeline names, one per line.
+    Pipelines,
     /// Check that the environment can actually drive agents.
     Doctor,
     /// Manage a stack of dependent branches.
@@ -379,6 +381,18 @@ fn real_main() -> Result<()> {
         }
 
         Cmd::Doctor => doctor(&root, cli.config.as_deref())?,
+
+        Cmd::Pipelines => {
+            let cfg = Config::load(&root, cli.config.as_deref())?;
+            // The unnamed top-level pipeline has nothing to call it by, so it
+            // only appears when it is the one that would actually run.
+            if cfg.default_pipeline.is_none() && !cfg.steps.is_empty() {
+                println!("steps");
+            }
+            for name in cfg.pipelines.keys() {
+                println!("{name}");
+            }
+        }
 
         Cmd::Status => {
             let branch = util::current_branch(&root)?;

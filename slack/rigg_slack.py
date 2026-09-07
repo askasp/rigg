@@ -28,7 +28,9 @@ RIGG = os.environ.get("RIGG_BIN", str(HERE.parent / "target" / "release" / "rigg
 
 HELP = """*rigg* — one repo per channel, stacks scoped to this channel.
 
-• `new <task>` — start a stack and run the pipeline on it
+• `new <task>` — start a stack and run the default pipeline on it
+• `<pipeline> <task>` — the same, with a named pipeline: `preview fix the button`
+• `pipelines` — which pipelines this repo has
 • `add <stack> <task>` — stack the next branch on top of one
 • `say <stack> <message>` — another turn in that stack's session
 • `stacks` — this channel's stacks and their state
@@ -144,6 +146,29 @@ def slug(task: str) -> str:
     return f"{stem}-{tail}"
 
 
+def pipelines(repo: Path) -> list[str]:
+    code, out = run_rigg(repo, ["pipelines"])
+    return out.splitlines() if code == 0 else []
+
+
+def match_pipeline(repo: Path, word: str) -> tuple[str | None, str | None]:
+    """Resolve a typed word to a pipeline name, or say why it did not.
+
+    Exact first, then substring - so `preview` reaches `full-preview` without
+    anyone having to know the full name, which is the point of typing a word
+    rather than passing a flag.
+    """
+    names = pipelines(repo)
+    if word in names:
+        return word, None
+    hits = [n for n in names if word in n]
+    if len(hits) == 1:
+        return hits[0], None
+    if len(hits) > 1:
+        return None, f"`{word}` matches {', '.join(f'`{h}`' for h in hits)} — say which"
+    return None, None
+
+
 def own_stacks(repo: Path, prefix: str) -> list[str]:
     code, out = run_rigg(repo, ["stack", "names"])
     if code != 0:
@@ -168,12 +193,16 @@ def filter_stack_list(out: str, prefix: str) -> str:
 # commands
 
 
-def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
+            pipeline: str | None = None) -> None:
     if not rest:
         say("give me a task: `new <task>`")
         return
     stack = f"{prefix}/{slug(rest)}"
-    code, out = run_rigg(repo, ["new", stack, rest])
+    args = ["new", stack, rest]
+    if pipeline:
+        args += ["--pipeline", pipeline]
+    code, out = run_rigg(repo, args)
     if code != 0:
         say(f"could not start `{stack}`:\n```\n{out[:2500]}\n```")
         return
@@ -221,6 +250,15 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     say(f"{'done' if code == 0 else 'failed'} — `{stack}`\n```\n{tail[:2500]}\n```")
 
 
+def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    names = pipelines(repo)
+    if not names:
+        say("no pipelines configured in this repo")
+        return
+    lines = "\n".join(f"• `{n}` — `{n.split('-')[-1] if '-' in n else n} <task>`" for n in names)
+    say(f"pipelines here:\n{lines}\n\n`new <task>` runs the default one.")
+
+
 def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     code, out = run_rigg(repo, ["stack", "list"])
     if code != 0:
@@ -248,6 +286,7 @@ COMMANDS = {
     "stacks": cmd_stacks,
     "status": cmd_stacks,
     "logs": cmd_logs,
+    "pipelines": cmd_pipelines,
 }
 
 
@@ -332,9 +371,18 @@ def main() -> int:
 
         verb, rest = parse(event.get("text", ""))
         fn = COMMANDS.get(verb)
+        pipeline = None
         if fn is None:
-            say(HELP)
-            return
+            # Not a command, so it may be a pipeline: `preview <task>` reads
+            # better than a flag, and non-coders do not have to learn one.
+            pipeline, ambiguous = match_pipeline(channel.repo, verb)
+            if ambiguous:
+                say(ambiguous)
+                return
+            if pipeline is None:
+                say(HELP)
+                return
+            fn = cmd_new
         refusal = channel.may(verb)
         if refusal:
             say(refusal)
@@ -345,7 +393,10 @@ def main() -> int:
             # several stacks in flight readable.
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
 
-        pool.submit(fn, channel.repo, name, rest, reply, event["channel"])
+        if pipeline:
+            pool.submit(fn, channel.repo, name, rest, reply, event["channel"], pipeline)
+        else:
+            pool.submit(fn, channel.repo, name, rest, reply, event["channel"])
 
     app.event("app_mention")(lambda event, client, say: handle(event, client, say))
 

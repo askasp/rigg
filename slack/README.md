@@ -18,7 +18,9 @@ Mention the bot in a channel, or DM it.
 
 | | |
 | --- | --- |
-| `new <task>` | start a stack and run the pipeline on it |
+| `new <task>` | start a stack and run the default pipeline |
+| `<pipeline> <task>` | the same with a named pipeline: `preview fix the button` |
+| `pipelines` | which pipelines this repo has |
 | `add <stack> <task>` | stack the next branch on top of one |
 | `say <stack> <message>` | another turn in that stack's session |
 | `stacks` | this channel's stacks and their state |
@@ -27,6 +29,12 @@ Mention the bot in a channel, or DM it.
 
 Stacks are referred to by their short name — `add proration-e4f "..."`, not the
 full `billing/proration-e4f`.
+
+A pipeline is chosen by typing its name instead of `new`, and any unambiguous
+part of it will do — `preview fix the button` reaches `full-preview`. A flag
+would have been fewer lines here and worse to explain to anyone who does not
+write code for a living. `commands` gates these like any other verb, so a
+channel limited to `stacks` and `logs` cannot start one.
 
 ## Setting up the Slack app
 
@@ -109,6 +117,4 @@ can be exercised against a scratch repo with no Slack credentials at all.
 - **A `confirm` step blocks a detached run**, so a pipeline with one cannot be
   started from Slack at all. rigg says so rather than skipping the step.
 - No approval buttons — every message in an allowed channel runs immediately.
-- Always runs the repo's default pipeline; no way to pick `full-preview` from
-  Slack yet.
 - `say` holds a worker thread for the whole turn; four can run at once.
