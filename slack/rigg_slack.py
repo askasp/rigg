@@ -317,6 +317,13 @@ def download_images(event: dict, token: str) -> tuple[list[str], str | None]:
                     continue
                 with open(dest, "wb") as out:
                     shutil.copyfileobj(r, out)
+        except urllib.error.HTTPError as e:
+            # 403 is what Slack returns without files:read. The sign-in-page
+            # case above is the same cause with a different symptom, so both
+            # should name it.
+            hint = " — is the files:read scope granted?" if e.code == 403 else ""
+            print(f"could not fetch slack file {f.get('name')}: {e}{hint}")
+            continue
         except (urllib.error.URLError, OSError) as e:
             print(f"could not fetch slack file {f.get('name')}: {e}")
             continue

@@ -29,6 +29,8 @@ oauth_config:
       - im:history
       # download images pasted into a message
       - files:read
+      # send screenshots and reports back into a thread
+      - files:write
 settings:
   event_subscriptions:
     bot_events:

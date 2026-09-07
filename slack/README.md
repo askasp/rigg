@@ -225,6 +225,30 @@ The bridge always passes `--no-paste`. rigg reads the clipboard when a person
 runs it in a terminal; the clipboard of whatever desktop the bridge happens to
 run on has nothing to do with whoever sent the message.
 
+## Sending a file back
+
+A pipeline step can put a file into the thread the run reports in — Playwright
+screenshots, a coverage report, anything worth looking at rather than reading
+in a log:
+
+```toml
+[[steps]]
+id = "e2e"
+run = """
+npx playwright test
+for f in test-results/**/*.png; do
+  /home/aksel/git/rigg/slack/upload.sh "$f" "failure shot"
+done
+"""
+```
+
+`RIGG_BRANCH` is already in the environment of a step, which is how the script
+finds the thread. It needs the **`files:write`** scope, and exits quietly when
+there is no token or no thread — so a run started by hand is unaffected.
+
+It uses Slack's external-upload flow rather than `files.upload`, which is
+deprecated and being removed.
+
 ## Reporting back
 
 Progress arrives through rigg's notify hook, which the bridge does not have to
