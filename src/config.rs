@@ -3,32 +3,9 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// How agent steps are driven.
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Backend {
-    /// Prompt a live agent through herdr and wait for its turn to settle.
-    #[default]
-    Herdr,
-    /// Spawn the agent's own non-interactive mode once per step.
-    Headless,
-}
-
-impl Backend {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Backend::Herdr => "herdr",
-            Backend::Headless => "headless",
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Default backend for every agent step.
-    #[serde(default)]
-    pub backend: Backend,
     #[serde(default)]
     pub agents: BTreeMap<String, AgentCfg>,
     /// The default pipeline.
@@ -43,6 +20,8 @@ pub struct Config {
     pub default_pipeline: Option<String>,
     #[serde(default)]
     pub stack: StackCfg,
+    #[serde(default)]
+    pub notify: NotifyCfg,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
@@ -54,27 +33,25 @@ pub struct Config {
 pub struct Pipeline {
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// Start from another pipeline's steps, then add this one's. Chains, so a
+    /// pipeline may extend one that itself extends another.
+    #[serde(default)]
+    pub extends: Option<String>,
+    /// Put this pipeline's own steps directly after the inherited step with
+    /// this id, rather than at the end. Only meaningful with `extends`.
+    #[serde(default)]
+    pub insert_after: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCfg {
-    /// Herdr agent kind: claude, opencode, codex, ...
+    /// Agent kind: claude, opencode, codex, ...
     pub kind: String,
-    /// Explicit herdr agent name to target, if you name your panes.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Split a pane and start this agent when it is not already running.
-    #[serde(default)]
-    pub autostart: bool,
-    /// Extra CLI args for this agent: passed on autostart in herdr mode, and
-    /// added to every turn in headless mode.
+    /// Extra CLI args, added to every turn.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Backend for this role, overriding the global `backend`.
-    #[serde(default)]
-    pub backend: Option<Backend>,
-    /// Headless argv for an agent rigg has no built-in command for.
+    /// Argv for an agent rigg has no built-in command for.
     /// `{{prompt}}` is replaced with the prompt; without it the prompt is
     /// appended as the last argument.
     #[serde(default)]
@@ -95,23 +72,6 @@ impl Step {
             return Ok(Some(text));
         }
         Ok(None)
-    }
-}
-
-/// Accepts either `until = "done"` or `until = ["done", "blocked"]`.
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl OneOrMany {
-    pub fn into_vec(self) -> Vec<String> {
-        match self {
-            OneOrMany::One(s) => vec![s],
-            OneOrMany::Many(v) => v,
-        }
     }
 }
 
@@ -138,16 +98,9 @@ pub struct Step {
     /// e.g. `capture = "review"` makes it available as `{{review}}`.
     #[serde(default)]
     pub capture: Option<String>,
-    /// Clear the agent's context before prompting.
+    /// Start a fresh session instead of resuming the previous step's.
     #[serde(default)]
     pub clear: bool,
-    /// State(s) to wait for. Defaults to herdr's own set: idle, done, blocked.
-    /// Claude ends a turn in `done`, not `idle`, so pinning a single state is
-    /// usually wrong.
-    #[serde(default)]
-    pub until: Option<OneOrMany>,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
     /// Only run when changed files match one of these globs.
     #[serde(default)]
     pub when_changed: Option<Vec<String>>,
@@ -157,6 +110,21 @@ pub struct Step {
     /// Pause for confirmation before running.
     #[serde(default)]
     pub confirm: bool,
+}
+
+/// A command run as a run moves through its steps, so something outside rigg -
+/// a chat bot, a desktop notifier - can follow along without tailing the log.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyCfg {
+    /// Shell command run at the start of a run, after every step, and when the
+    /// run ends. Details arrive as `RIGG_*` environment variables rather than
+    /// as arguments, so nothing has to be quoted: RIGG_EVENT (start, step,
+    /// done, failed), RIGG_MESSAGE (a ready-made one-line summary),
+    /// RIGG_BRANCH, RIGG_STEP, RIGG_STATUS, RIGG_INDEX, RIGG_TOTAL,
+    /// RIGG_ELAPSED, RIGG_REPO, RIGG_TASK.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -171,10 +139,15 @@ pub struct StackCfg {
     /// Globs that mark a change as frontend.
     #[serde(default)]
     pub frontend_paths: Vec<String>,
-    /// Where to put worktrees when not going through herdr. Defaults to
-    /// ~/.rigg/worktrees/<repo>.
+    /// Where to put worktrees. Defaults to ~/.rigg/worktrees/<repo>.
     #[serde(default)]
     pub worktree_dir: Option<String>,
+    /// Command run in a checkout just before its worktree is removed, so a
+    /// branch that started services can stop them again. Supports {{branch}},
+    /// {{base}} and {{repo}} (the checkout). A failure is reported but does
+    /// not stop the removal that was asked for.
+    #[serde(default)]
+    pub teardown: Option<String>,
 }
 
 impl Default for StackCfg {
@@ -184,6 +157,7 @@ impl Default for StackCfg {
             preview_label: None,
             frontend_paths: Vec::new(),
             worktree_dir: None,
+            teardown: None,
         }
     }
 }
@@ -239,14 +213,6 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Backend for a role: its own override, else the global default.
-    pub fn backend_for(&self, role: &str) -> Backend {
-        self.agents
-            .get(role)
-            .and_then(|a| a.backend)
-            .unwrap_or(self.backend)
-    }
-
     /// Steps for a pipeline by name, or the default pipeline.
     pub fn steps_for(&self, name: Option<&str>) -> Result<Vec<Step>> {
         // An explicit choice wins, then `default_pipeline`, then the top-level
@@ -254,22 +220,68 @@ impl Config {
         let name = name.or(self.default_pipeline.as_deref());
         match name {
             None => Ok(self.steps.clone()),
-            Some(n) => self
-                .pipelines
-                .get(n)
-                .map(|p| p.steps.clone())
-                .ok_or_else(|| {
-                    let known: Vec<&str> = self.pipelines.keys().map(|s| s.as_str()).collect();
-                    anyhow::anyhow!(
-                        "no pipeline `{n}`; known pipelines: {}",
-                        if known.is_empty() { "(none)".into() } else { known.join(", ") }
-                    )
-                }),
+            Some(n) => self.resolve_pipeline(n, &mut Vec::new()),
         }
+    }
+
+    /// Flatten a pipeline and everything it extends into one list of steps.
+    fn resolve_pipeline(&self, name: &str, seen: &mut Vec<String>) -> Result<Vec<Step>> {
+        if seen.iter().any(|s| s == name) {
+            seen.push(name.to_string());
+            bail!("pipeline `{}` extends itself: {}", seen[0], seen.join(" -> "));
+        }
+        seen.push(name.to_string());
+
+        let p = self.pipelines.get(name).ok_or_else(|| {
+            let known: Vec<&str> = self.pipelines.keys().map(|s| s.as_str()).collect();
+            anyhow::anyhow!(
+                "no pipeline `{name}`; known pipelines: {}",
+                if known.is_empty() { "(none)".into() } else { known.join(", ") }
+            )
+        })?;
+
+        let mut steps = match &p.extends {
+            Some(parent) => self.resolve_pipeline(parent, seen)?,
+            None => Vec::new(),
+        };
+
+        match &p.insert_after {
+            Some(id) => {
+                let at = steps
+                    .iter()
+                    .position(|s| &s.id == id)
+                    .with_context(|| {
+                        let ids: Vec<&str> = steps.iter().map(|s| s.id.as_str()).collect();
+                        format!(
+                            "pipeline `{name}`: insert_after = \"{id}\" names no inherited \
+                             step; it has {}",
+                            if ids.is_empty() { "none".into() } else { ids.join(", ") }
+                        )
+                    })?;
+                for (i, step) in p.steps.iter().enumerate() {
+                    steps.insert(at + 1 + i, step.clone());
+                }
+            }
+            None => steps.extend(p.steps.iter().cloned()),
+        }
+
+        // `--from` and `--only` address steps by id, so a duplicate would make
+        // them ambiguous rather than merely untidy.
+        for (i, step) in steps.iter().enumerate() {
+            if steps[..i].iter().any(|e| e.id == step.id) {
+                bail!("pipeline `{name}` ends up with two steps called `{}`", step.id);
+            }
+        }
+        Ok(steps)
     }
 
 
     fn validate(&self) -> Result<()> {
+        // Resolve every pipeline now, so a broken `extends` is a config error
+        // rather than a surprise the first time that pipeline is chosen.
+        for name in self.pipelines.keys() {
+            self.resolve_pipeline(name, &mut Vec::new())?;
+        }
         if let Some(d) = &self.default_pipeline {
             if !self.pipelines.contains_key(d) {
                 let known: Vec<&str> = self.pipelines.keys().map(|s| s.as_str()).collect();
@@ -316,41 +328,21 @@ impl Config {
     }
 }
 
-/// Context-clearing command per agent kind.
-pub fn clear_command(kind: &str) -> &'static str {
-    match kind {
-        "opencode" | "codex" | "gemini" => "/new",
-        _ => "/clear",
-    }
-}
-
 pub const TEMPLATE: &str = r#"# rigg pipeline
 # Steps run top to bottom. Start them with: rigg run --task "..."
 
-# How agent steps are driven. "herdr" prompts a live agent in a pane and waits
-# for its turn to settle; "headless" runs the agent's own non-interactive mode
-# once per step (claude -p, opencode run) and needs no herdr at all.
-# `rigg run --headless` forces headless for one run.
-backend = "herdr"
-
 [agents.impl]
 kind = "claude"
-autostart = true
-# Headless agents run unattended, so they need a permission mode or they will
-# describe changes instead of making them. `acceptEdits` allows file edits;
+# An agent running unattended needs a permission mode or it will describe
+# changes instead of making them. `acceptEdits` allows file edits;
 # `bypassPermissions` also allows commands.
 args = ["--permission-mode", "acceptEdits"]
-# backend = "headless"           # per-role override
-# command = ["my-agent", "--print", "{{prompt}}"]   # headless argv for an
-                                 # agent rigg has no built-in command for
+# command = ["my-agent", "--print", "{{prompt}}"]   # argv for an agent rigg
+                                 # has no built-in command for
 
 # A second model is the point of a Copilot-style review, without the round trip.
-# NOTE: as of opencode 1.18.27 herdr cannot submit prompts to opencode - the
-# text lands in the composer but Enter never fires. Until that is fixed, run the
-# reviewer on claude too, or point `kind` at another working agent.
 # [agents.reviewer]
 # kind = "opencode"
-# autostart = true
 
 [stack]
 trunk = "main"
@@ -361,18 +353,15 @@ frontend_paths = ["src/**/*.tsx", "src/**/*.css", "app/**"]
 id = "implement"
 agent = "impl"
 prompt = "{{task}}"
-# `until` defaults to herdr's own set (idle, done, blocked). Claude finishes a
-# turn in `done`, so do not pin this to `idle` - it will wait forever.
 
 [[steps]]
 id = "self-review"
 agent = "impl"
 clear = true                     # fresh context, as you do by hand
 prompt = "/code-review"
-# `clear` means the opposite thing per backend, because the underlying sessions
-# are opposite: herdr sends /clear to a session that would otherwise carry
-# context on, while headless steps resume the previous session (--continue)
-# unless `clear` tells them to start a new one.
+# Each step is one non-interactive turn, so rigg resumes the previous step's
+# session (--continue) to carry context forward. `clear` leaves that flag off
+# and starts a new session instead.
 
 [[steps]]
 id = "test"

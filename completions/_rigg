@@ -27,9 +27,14 @@ _rigg() {
     _describe 'command' cmds
     return
   fi
+  # --image takes a file, wherever it appears.
+  if [[ "${words[CURRENT-1]}" == "--image" ]]; then
+    _files
+    return
+  fi
   case "${words[2]}" in
     add|say|attach|logs) (( CURRENT == 3 )) && _rigg_stacks ;;
-    stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr ;;
+    stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
   esac
 }
 

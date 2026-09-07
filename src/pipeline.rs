@@ -1,23 +1,17 @@
-use anyhow::{anyhow, bail, Result};
-use std::collections::{BTreeMap, HashMap};
+use anyhow::{bail, Result};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::config::{clear_command, Backend, Config, Step};
+use crate::config::{Config, Step};
 use crate::headless;
-use crate::herdr;
 use crate::util;
-
-/// Slash commands settle instantly; give the TUI a beat before the real prompt.
-const CLEAR_SETTLE_MS: u64 = 900;
 
 pub struct Runner {
     pub root: PathBuf,
     pub cfg: Config,
     pub vars: BTreeMap<String, String>,
     pub dry_run: bool,
-    force_headless: bool,
-    targets: HashMap<String, String>,
 }
 
 impl Runner {
@@ -26,86 +20,41 @@ impl Runner {
         cfg: Config,
         vars: BTreeMap<String, String>,
         dry_run: bool,
-        force_headless: bool,
     ) -> Self {
         Self {
             root,
             cfg,
             vars,
             dry_run,
-            force_headless,
-            targets: HashMap::new(),
         }
     }
 
-    fn backend_for(&self, role: &str) -> Backend {
-        if self.force_headless {
-            Backend::Headless
-        } else {
-            self.cfg.backend_for(role)
-        }
-    }
-
-    /// Map an agent role from the config onto a herdr agent target.
-    fn resolve_target(&mut self, role: &str) -> Result<String> {
-        if let Some(t) = self.targets.get(role) {
-            return Ok(t.clone());
-        }
-        let acfg = self
-            .cfg
-            .agents
-            .get(role)
-            .ok_or_else(|| anyhow!("unknown agent role `{role}`"))?
-            .clone();
-
-        if let Some(name) = &acfg.name {
-            self.targets.insert(role.into(), name.clone());
-            return Ok(name.clone());
-        }
-
-        let root_str = self.root.to_string_lossy().to_string();
-        // Never target the pane rigg is running in: an agent that launched the
-        // pipeline would otherwise be handed its own prompts.
-        let own_pane = std::env::var("HERDR_PANE_ID").unwrap_or_default();
-        let all = herdr::agents()?;
-        let mut matches: Vec<_> = all
-            .iter()
-            .filter(|a| a.agent == acfg.kind && a.cwd == root_str && a.pane_id != own_pane)
-            .collect();
-
-        // Prefer agents in the workspace we were invoked from.
-        if let Some(ws) = herdr::current_workspace() {
-            if matches.iter().any(|a| a.workspace_id == ws) {
-                matches.retain(|a| a.workspace_id == ws);
-            }
-        }
-
-        let target = match matches.len() {
-            1 => matches[0].pane_id.clone(),
-            0 => {
-                if !acfg.autostart {
-                    bail!(
-                        "no `{}` agent running in {root_str}. Start one, or set \
-                         `autostart = true` for role `{role}`.",
-                        acfg.kind
-                    );
-                }
-                println!("  starting {} for role `{role}`...", acfg.kind);
-                herdr::start_agent(role, &acfg.kind, &root_str, &acfg.args)?
-            }
-            _ => {
-                let panes: Vec<_> = matches.iter().map(|a| a.pane_id.as_str()).collect();
-                bail!(
-                    "{} `{}` agents match role `{role}` ({}). Name one with \
-                     `herdr agent rename <pane> <name>` and set `name` in rigg.toml.",
-                    matches.len(),
-                    acfg.kind,
-                    panes.join(", ")
-                );
-            }
+    /// Tell the notify hook where the run has got to.
+    ///
+    /// Never fails a run: the hook is someone else's command, and a chat bot
+    /// being down is not a reason to abandon work the agent already did.
+    fn notify(&self, event: &str, message: &str, extra: &[(&str, String)]) {
+        let Some(cmd) = self.cfg.notify.command.clone() else {
+            return;
         };
-        self.targets.insert(role.into(), target.clone());
-        Ok(target)
+        if self.dry_run {
+            return;
+        }
+        let mut env: Vec<(&str, String)> = vec![
+            ("RIGG_EVENT", event.to_string()),
+            ("RIGG_MESSAGE", message.to_string()),
+            ("RIGG_BRANCH", self.var("branch")),
+            ("RIGG_REPO", self.var("repo")),
+            ("RIGG_TASK", self.var("task")),
+        ];
+        env.extend(extra.iter().map(|(k, v)| (*k, v.clone())));
+        if let Err(e) = util::shell_quiet(&self.root, &cmd, &env) {
+            println!("  notify hook failed: {e}");
+        }
+    }
+
+    fn var(&self, key: &str) -> String {
+        self.vars.get(key).cloned().unwrap_or_default()
     }
 
     fn should_run(&self, step: &Step) -> Result<bool> {
@@ -162,63 +111,28 @@ impl Runner {
 
         let role = step.agent.clone().expect("validated: prompt implies agent");
         let acfg = self.cfg.agents[&role].clone();
-        let kind = acfg.kind.clone();
-        let raw = step
-            .prompt_text(&self.cfg.dir)?
-            .unwrap_or_default();
+        let raw = step.prompt_text(&self.cfg.dir)?.unwrap_or_default();
         let text = util::render(&raw, &self.vars);
 
-        if self.backend_for(&role) == Backend::Headless {
-            // A one-shot invocation has no session to clear, so `clear` inverts
-            // here: it means "do not resume the previous step's session".
-            let argv = headless::command_for(&acfg, &text, !step.clear);
-            println!("  -> [{role}] {}", describe(&argv, &text));
-            if self.dry_run {
-                return Ok(());
-            }
-            return headless::run(&self.root, &argv);
-        }
-
-        let until: Vec<String> = step
-            .until
-            .clone()
-            .map(|u| u.into_vec())
-            .unwrap_or_default();
-
+        // A one-shot invocation has no session of its own, so continuity comes
+        // from the agent's resume flag; `clear` is what leaves it off.
+        let argv = headless::command_for(&acfg, &text, !step.clear);
+        println!("  -> [{role}] {}", describe(&argv, &text));
         if self.dry_run {
-            println!("  -> [{role}] {}", first_line(&text));
             return Ok(());
         }
-
-        let target = self.resolve_target(&role)?;
-
-        if step.clear {
-            let cmd = clear_command(&kind);
-            println!("  -> [{role}] {cmd}");
-            herdr::prompt_nowait(&target, cmd)?;
-            std::thread::sleep(std::time::Duration::from_millis(CLEAR_SETTLE_MS));
-        }
-
-        println!("  -> [{role}] {}", first_line(&text));
-        // An agent parked behind a modal - claude's trust-this-folder dialog is
-        // the common one in a fresh worktree - reports `idle`, so the wait can
-        // match the state it was already in and the step would pass having done
-        // nothing. Require the state counter to actually move.
-        let before = herdr::agent_seq(&target).ok();
-        herdr::prompt(&target, &text, &until, step.timeout_ms)?;
-        let after = herdr::agent_seq(&target).ok();
-        if before.is_some() && before == after {
-            bail!(
-                "agent `{role}` never processed the prompt (state did not change). \
-                 It is probably waiting on a dialog - check pane {target}."
-            );
-        }
-        Ok(())
+        headless::run(&self.root, &argv)
     }
 
     pub fn run(&mut self, steps: &[Step]) -> Result<()> {
         let total = steps.len();
         let started = std::time::Instant::now();
+        let branch = self.var("branch");
+        self.notify(
+            "start",
+            &format!("*{branch}* started - {total} step(s)"),
+            &[("RIGG_TOTAL", total.to_string())],
+        );
         for (i, step) in steps.iter().enumerate() {
             let label = step.description.clone().unwrap_or_else(|| step.id.clone());
             let head = format!("[{}/{}] {}", i + 1, total, label);
@@ -237,22 +151,45 @@ impl Runner {
                 continue;
             }
 
-            match self.run_step(step) {
-                Ok(()) => println!("  ok ({})", elapsed(step_started)),
+            let took = || elapsed(step_started);
+            let mut at = vec![
+                ("RIGG_STEP", step.id.clone()),
+                ("RIGG_INDEX", (i + 1).to_string()),
+                ("RIGG_TOTAL", total.to_string()),
+            ];
+            let outcome = self.run_step(step);
+            at.push(("RIGG_ELAPSED", took()));
+            let head = format!("*{branch}* [{}/{total}] `{}`", i + 1, step.id);
+
+            match outcome {
+                Ok(()) => {
+                    println!("  ok ({})", took());
+                    at.push(("RIGG_STATUS", "ok".into()));
+                    self.notify("step", &format!("{head} ok ({})", took()), &at);
+                }
                 Err(e) if step.continue_on_error => {
-                    println!("  failed after {} (continuing): {e}", elapsed(step_started));
+                    println!("  failed after {} (continuing): {e}", took());
+                    at.push(("RIGG_STATUS", "failed".into()));
+                    self.notify("step", &format!("{head} failed, continuing: {e}"), &at);
                 }
                 Err(e) => {
-                    herdr::notify(&format!("rigg: step `{}` failed", step.id));
+                    println!("  failed after {}", took());
+                    at.push(("RIGG_STATUS", "failed".into()));
+                    self.notify("failed", &format!("{head} failed: {e}"), &at);
                     return Err(e.context(format!(
                         "step `{}` failed after {}",
                         step.id,
-                        elapsed(step_started)
+                        took()
                     )));
                 }
             }
         }
         println!("\ntotal {}", elapsed(started));
+        self.notify(
+            "done",
+            &format!("*{branch}* finished - {total} step(s) in {}", elapsed(started)),
+            &[("RIGG_TOTAL", total.to_string()), ("RIGG_ELAPSED", elapsed(started))],
+        );
         Ok(())
     }
 }

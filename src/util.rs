@@ -91,7 +91,7 @@ pub fn random_name() -> String {
     )
 }
 
-/// Create a worktree with plain git, for setups with no herdr.
+/// Create a worktree with plain git.
 pub fn git_worktree_add(
     main: &std::path::Path,
     branch: &str,
@@ -108,8 +108,8 @@ pub fn git_worktree_add(
     Ok(())
 }
 
-/// The repository's primary checkout, which is where worktree creation has to
-/// run from - herdr refuses to branch a new worktree off a linked one.
+/// The repository's primary checkout. Worktrees are created from there, so
+/// every checkout hangs off one place rather than chaining off each other.
 pub fn main_checkout(root: &std::path::Path) -> Result<PathBuf> {
     let common = git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     Ok(std::path::Path::new(&common)
@@ -215,6 +215,29 @@ pub fn shell_capture(dir: &std::path::Path, cmd: &str) -> Result<String> {
         );
     }
     Ok(stdout)
+}
+
+/// Run a shell command with extra environment, discarding its output.
+///
+/// Used for the notify hook, where the command is someone else's and its
+/// chatter does not belong in the run log.
+pub fn shell_quiet(dir: &std::path::Path, cmd: &str, env: &[(&str, String)]) -> Result<()> {
+    let mut c = Command::new("sh");
+    c.current_dir(dir).arg("-c").arg(cmd);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c
+        .output()
+        .with_context(|| format!("failed to spawn shell for `{cmd}`"))?;
+    if !out.status.success() {
+        bail!(
+            "exit {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Run a shell command, streaming output to the terminal.

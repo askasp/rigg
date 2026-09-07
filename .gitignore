@@ -1,2 +1,4 @@
 /target
 .rigg/
+__pycache__/
+slack/channels.toml

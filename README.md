@@ -1,30 +1,23 @@
 # rigg
 
-Pipeline runner for AI coding agents, built on [Herdr](https://herdr.dev).
+Pipeline runner for AI coding agents.
 
 You describe your repo's workflow once in `rigg.toml`; `rigg` drives the agents
 through it — prompting them, waiting for each turn to actually finish, running
 shell steps in between, and managing stacked branches.
 
-## Why Herdr rather than a shell script
+## How a step runs
 
-The hard part of this workflow is not ordering commands, it is knowing when an
-agent is *done*. Herdr tracks agent lifecycle state through integration hooks,
-so `herdr agent prompt <pane> "..." --wait` blocks until the turn genuinely
-settles instead of polling terminal output. `rigg` is a thin layer over that.
-
-Because Herdr owns the terminals, this works the same for Claude Code, opencode,
-Codex and the rest, and you can still watch and interrupt every step by hand.
-
-For unattended runs there is a second backend that skips Herdr entirely and
-drives the agents' own non-interactive modes — see [Backends](#backends).
+Each agent step is one non-interactive turn — `claude -p "..."`,
+`opencode run "..."` — spawned in the branch's checkout with its output
+streamed to the run log. Process exit *is* the end of the turn, so there is no
+agent state to watch and nothing to install: the same pipeline works for Claude
+Code, opencode, Codex and anything else with a print mode.
 
 ## Setup
 
 ```sh
 cargo build --release
-herdr integration install claude      # required: enables accurate agent state
-herdr plugin link .                   # optional: adds "Rigg: run pipeline"
 rigg init                             # writes a starter rigg.toml
 rigg doctor                           # checks the whole chain
 ```
@@ -35,7 +28,6 @@ rigg doctor                           # checks the whole chain
 rigg run --task "Add rate limiting to the upload endpoint"
 rigg run --from self-review           # resume partway through
 rigg run --only test --dry-run        # see what would happen, touch nothing
-rigg run --headless --task "..."      # no herdr: claude -p / opencode run
 rigg status
 ```
 
@@ -66,8 +58,8 @@ the task and generates a stack name.
 there; `say` continues the agent session in that stack's tip rather than running
 a pipeline. `attach` opens an interactive agent on the stack's checkout, resuming the
 session the pipeline was using (`--continue`), so you can take over by hand. It
-refuses while a run is still in flight - a headless step owns its conversation
-for as long as it runs, and claude will not resume one another process still has
+refuses while a run is still in flight - a step owns its conversation for as
+long as it runs, and claude will not resume one another process still has
 open. Use `rigg logs -f` to watch, `--wait` to open the session the moment the
 run finishes, or `--force` to start a second session alongside it. Stacks
 with a run in flight are marked `[running]` by `rigg stack list`.
@@ -75,9 +67,7 @@ It resumes by session id and prints which one, rather than relying on
 `--continue`, and says plainly when a checkout has no previous session instead
 of leaving claude to report that it found nothing.
 
-`--new` starts a fresh session instead, `--path` only prints the directory, and
-under herdr it focuses the existing workspace rather than starting a second
-agent on the same checkout.
+`--new` starts a fresh session instead, and `--path` only prints the directory.
 
 A branch name resolves to itself. A stack name resolves to the branch you most
 likely mean - the one being worked on now, else the newest that exists on disk -
@@ -110,6 +100,31 @@ Aliases: `rn`, `rad`, `ra`, `rl`, `rsay`, `rs`, `rrm`.
 
 `say --push` commits and pushes whatever the turn changed, using the request as
 the commit subject, so a follow-up reaches the PR without a second command.
+
+### Images
+
+A terminal cannot receive a pasted image, so rigg reads the system clipboard
+itself. Copy a screenshot, then write the task as usual — `new`, `add` and
+`say` pick the image up and tell you they did:
+
+```
+$ rigg new billing
+task> the spacing in this dialog is wrong
+  attached clipboard image (48 KB)
+  copy another image and press enter, or just press enter to start>
+```
+
+The clipboard holds one image at a time, so after taking one it offers to take
+another: copy the next screenshot and press enter. Enter on an unchanged
+clipboard starts the run. `--image <path>` attaches a file instead and can be
+repeated; `--no-paste` leaves the clipboard alone.
+
+Images land in `.rigg/media/` inside the branch's checkout and are named at the
+end of the prompt, so the agent reads them as files. That directory is added to
+`.git/info/exclude`, so it never shows up in `git status` or reaches a commit.
+
+Needs `wl-paste` (Wayland) or `xclip` (X11) for the clipboard; `--image` works
+without either.
 
 `say` with no arguments picks a stack and then asks what to send, the same shape
 as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
@@ -189,7 +204,7 @@ Each branch is cut from the previous branch's last commit, so a pipeline that
 stacks must commit its work - otherwise the next branch silently starts without
 it. `rigg add` refuses when the base branch's checkout is dirty.
 
-Stacked PRs — each branch is a Herdr worktree rooted on the one below it, so
+Stacked PRs — each branch is a git worktree rooted on the one below it, so
 every PR is reviewable on its own. Stacks are named, and several can sit on the
 trunk at once:
 
@@ -202,7 +217,7 @@ rigg stack push y --base main         # force a new stack rooted here
 rigg stack list               # every stack, current branch marked
 rigg stack pr                 # PR against its own base, labelled if frontend
 rigg stack prune              # dry run: worktrees whose branch already landed
-rigg stack prune --yes        # close their workspaces and remove the checkouts
+rigg stack prune --yes        # remove the checkouts
 ```
 
 `stack push` picks its target this way: an explicit `--stack` wins; otherwise it
@@ -215,13 +230,28 @@ accidentally piling the second onto the first.
 `gh pr edit --add-label`, which still queries Projects (classic) and therefore
 fails outright on GitHub today.
 
+### Tearing a branch down
+
+A pipeline that starts something — a dev stack, a tunnel — leaves it running
+after the run ends. `teardown` is what stops it, and runs in the checkout just
+before its worktree is removed by either `stack rm` or `prune`:
+
+```toml
+[stack]
+teardown = "./dev.sh stop"
+```
+
+It supports `{{branch}}`, `{{base}}` and `{{repo}}` (the checkout). A dry run
+prints what it would run without running it. A failure is reported but does not
+stop the removal you asked for — though it is worth reading, since a leaked
+docker stack is invisible until the disk fills.
+
 `stack prune` deletes the merged branches along with their checkouts, since
 `git branch -d` refuses anything not actually merged; pass `--keep-branches` to
 keep them. It only touches a worktree whose branch is an ancestor of the trunk
-(`origin/<trunk>`, else `<trunk>`), whose checkout is clean, and which is either
-owned by a herdr workspace it can close first or is not any process's working
-directory. The main checkout and the worktree you run it from are never
-candidates.
+(`origin/<trunk>`, else `<trunk>`), whose checkout is clean, and which is not
+any process's working directory. The main checkout and the worktree you run it
+from are never candidates.
 
 ## Config
 
@@ -234,6 +264,37 @@ prompts to live:
   rigg.toml
   reviewer.md
 ```
+
+### Chaining pipelines
+
+A pipeline can start from another's steps rather than repeating them. So one
+variant can exist with and without an extra stage:
+
+```toml
+[[pipelines.full.steps]]
+id = "implement"
+# ... commit, push-and-pr, wait-copilot
+
+# Everything `full` does, plus a preview brought up as soon as the PR exists.
+[pipelines.full-preview]
+extends = "full"
+insert_after = "push-and-pr"     # default is to append at the end
+
+[[pipelines.full-preview.steps]]
+id = "preview-up"
+run = "./dev.sh quick -d"
+```
+
+`rigg full-preview new billing "..."` then runs six steps, with the two new ones
+sitting between `push-and-pr` and `wait-copilot` — placement matters when the
+step it would otherwise follow waits 20 minutes for a review.
+
+`extends` chains, so a pipeline may extend one that itself extends another. A
+cycle, an `insert_after` that names no inherited step, and two steps ending up
+with the same id are all config errors caught by `rigg doctor` rather than
+surprises on the first run.
+
+### Choosing a pipeline
 
 The pipeline that runs when none is named is the top-level `[[steps]]`. To make
 a named one the default instead:
@@ -263,8 +324,8 @@ prompt_file = "reviewer.md"
 
 ```toml
 [agents.impl]
-kind = "claude"        # herdr agent kind
-autostart = true       # split a pane and start it if not already running
+kind = "claude"        # agent kind: claude, opencode, codex, ...
+args = ["--permission-mode", "acceptEdits"]   # added to every turn
 
 [[steps]]
 id = "implement"
@@ -274,7 +335,7 @@ prompt = "{{task}}"    # also {{branch}}, {{base}}, {{repo}}
 [[steps]]
 id = "self-review"
 agent = "impl"
-clear = true           # /clear first, so review runs on fresh context
+clear = true           # a new session, so review runs on fresh context
 
 [[steps]]
 id = "test"
@@ -286,32 +347,18 @@ continue_on_error = true
 output can be fed straight into a later prompt - that is how PR review comments
 reach the agent.
 
-Other step keys: `until`, `timeout_ms`, `when_changed` (globs — used for
-frontend-only steps), `confirm`, `description`.
+Other step keys: `when_changed` (globs — used for frontend-only steps),
+`confirm`, `description`.
 
-## Backends
+## Sessions
 
-```toml
-backend = "herdr"      # default; per-role override in [agents.<role>]
-```
+Each step is a separate process with no memory of the last one, so continuity
+comes from the agent's own resume flag: rigg passes `--continue` to every step
+that did not ask for a fresh context, and `clear = true` is what leaves it off.
 
-- **`herdr`** — prompt a long-lived agent in a pane and wait for the turn to
-  settle. Interactive: you watch it, and you can interrupt it.
-- **`headless`** — run the agent's own non-interactive mode once per step
-  (`claude -p "..."`, `opencode run "..."`) in the repo root, streaming its
-  output. Process exit *is* the end of the turn, so there is no state to wait
-  on and no Herdr, no session and no integration hooks are needed. `rigg run
-  --headless` forces it for one run; `rigg doctor --headless` checks it.
-
-**`clear` inverts between the two**, because the sessions are opposite. A Herdr
-session carries context forward on its own and `clear = true` wipes it with
-`/clear`. A headless invocation starts with nothing, so rigg resumes the
-previous one with `--continue`; `clear = true` is what leaves that flag off and
-starts a fresh session.
-
-`--continue` resumes the most recent session in the repo directory, so the
-first step of a headless run picks up where the last one left off — give it
-`clear = true` when a run should start clean.
+`--continue` resumes the most recent session in the checkout, so the first step
+of a run picks up where the last one left off — give it `clear = true` when a
+run should start clean.
 
 Unknown agent kinds get `<kind> "<prompt>"` and no resume flag. Give them a
 real command line instead:
@@ -323,31 +370,32 @@ command = ["my-agent", "--print", "{{prompt}}"]
 ```
 
 A `command` is used verbatim — rigg adds no continue flag to it, so put one in
-the template if the tool has one. `until` and `timeout_ms` are Herdr-only.
+the template if the tool has one.
+
+## Reporting progress
+
+```toml
+[notify]
+command = "./slack/notify.sh"
+```
+
+Runs at the start of a run, after every step, and when the run ends. Details
+arrive as environment variables rather than arguments, so nothing needs
+quoting: `RIGG_EVENT` (start, step, done, failed), `RIGG_MESSAGE` (a ready-made
+one-line summary), plus `RIGG_BRANCH`, `RIGG_STEP`, `RIGG_STATUS`,
+`RIGG_INDEX`, `RIGG_TOTAL`, `RIGG_ELAPSED`, `RIGG_REPO` and `RIGG_TASK`.
+
+A failing hook never fails a run — it prints a line and the run carries on.
+`--dry-run` does not fire it.
+
+`slack/` uses this to drive [rigg from a Slack channel](slack/README.md), one
+repo per channel.
 
 ## Things worth knowing
 
-These were found the hard way while building this, and are encoded in the
-defaults:
-
-- **A headless agent needs a permission mode or it will edit nothing.** Run
-  unattended, `claude -p` describes the change it would make and stops. Give the
-  role `args = ["--permission-mode", "acceptEdits"]` (or `bypassPermissions` to
-  allow commands too). This does not apply in herdr mode, where the live session
-  already has its own permission setting.
-- **Claude finishes a turn in state `done`, not `idle`.** Waiting on `idle`
-  alone hangs forever. `until` is therefore unset by default, which makes Herdr
-  match its own set of `idle`, `done` and `blocked`.
-- **Slash commands are sent without `--wait`.** `/clear` settles instantly and
-  never enters a working state, so `--wait` would fail with
-  `agent_prompt_stalled` after 5s.
-- **rigg never targets its own pane.** An agent that starts a pipeline would
-  otherwise be handed its own prompts.
-- **opencode's TUI cannot currently be driven** (as of opencode 1.18.27): Herdr
-  delivers the prompt text into the composer but no synthetic key — `enter`,
-  `ctrl+m`, `return`, `ctrl+j`, a literal CR — submits it. Until that is fixed,
-  a second-model reviewer has to run on another agent kind — or on the headless
-  backend, where `opencode run` submits the prompt fine.
-- **`herdr pane run` re-parses its command through a shell**, so anything passed
-  to it needs quoting rather than argv splitting.
-# rigg
+**An agent needs a permission mode or it will edit nothing.** Run unattended,
+`claude -p` describes the change it would make and stops rather than doing it.
+Give the role `args = ["--permission-mode", "acceptEdits"]`, or
+`bypassPermissions` to allow commands too. This is the one thing that will
+silently produce a run that looks like it worked and changed nothing, which is
+why `rigg init` puts it in the starter config.

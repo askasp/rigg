@@ -1,6 +1,6 @@
 mod config;
 mod headless;
-mod herdr;
+mod media;
 mod pipeline;
 mod stack;
 mod util;
@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 
-use config::{Backend, Config};
+use config::Config;
 use stack::{Entry, Stacks};
 
 #[derive(Parser)]
@@ -46,8 +46,12 @@ enum Cmd {
         pipeline: Option<String>,
         #[arg(long)]
         base: Option<String>,
+        /// Attach an image file to the task. Repeatable.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
+        /// Do not look at the clipboard for an image.
         #[arg(long)]
-        headless: bool,
+        no_paste: bool,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -64,8 +68,12 @@ enum Cmd {
         /// Name the new branch explicitly instead of <stack>-<n>.
         #[arg(long)]
         branch: Option<String>,
+        /// Attach an image file to the task. Repeatable.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
+        /// Do not look at the clipboard for an image.
         #[arg(long)]
-        headless: bool,
+        no_paste: bool,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -106,6 +114,12 @@ enum Cmd {
         /// Commit and push whatever the turn changed, so it reaches the PR.
         #[arg(long)]
         push: bool,
+        /// Attach an image file to the message. Repeatable.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
+        /// Do not look at the clipboard for an image.
+        #[arg(long)]
+        no_paste: bool,
     },
     /// Run the pipeline.
     Run {
@@ -127,9 +141,6 @@ enum Cmd {
         /// Print what would happen without touching any agent.
         #[arg(long)]
         dry_run: bool,
-        /// Drive every agent step headlessly, whatever the config says.
-        #[arg(long)]
-        headless: bool,
     },
     /// Show the shell keybindings and aliases.
     Keys {
@@ -146,17 +157,10 @@ enum Cmd {
         #[arg(short, long)]
         follow: bool,
     },
-    /// Show agents, branch, and stack state.
+    /// Show the branch and stack state.
     Status,
     /// Check that the environment can actually drive agents.
-    Doctor {
-        /// Check the headless backend, whatever the config says.
-        #[arg(long)]
-        headless: bool,
-    },
-    /// Entry point for the Herdr plugin action: opens a pane and runs the pipeline.
-    #[command(hide = true)]
-    PluginRun,
+    Doctor,
     /// Manage a stack of dependent branches.
     Stack {
         #[command(subcommand)]
@@ -321,10 +325,6 @@ fn main() {
 fn real_main() -> Result<()> {
     let cli = Cli::parse_from(rewrite_pipeline_prefix(std::env::args().collect()));
 
-    if matches!(cli.cmd, Cmd::PluginRun) {
-        return plugin_run();
-    }
-
     // Works anywhere; it says nothing about a repository.
     if let Cmd::Keys { shell } = &cli.cmd {
         let shell = shell.clone();
@@ -356,7 +356,7 @@ fn real_main() -> Result<()> {
     let root = util::repo_root()?;
 
     match cli.cmd {
-        Cmd::PluginRun | Cmd::Keys { .. } => unreachable!("handled above"),
+        Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
             let [preferred, legacy] = Config::candidates(&root);
             if legacy.exists() && !force {
@@ -378,7 +378,7 @@ fn real_main() -> Result<()> {
             println!("Edit the steps, then: rigg run --task \"...\"");
         }
 
-        Cmd::Doctor { headless } => doctor(&root, cli.config.as_deref(), headless)?,
+        Cmd::Doctor => doctor(&root, cli.config.as_deref())?,
 
         Cmd::Status => {
             let branch = util::current_branch(&root)?;
@@ -414,20 +414,6 @@ fn real_main() -> Result<()> {
                     }
                 }
             }
-            match herdr::agents() {
-                Ok(agents) => {
-                    let root_str = root.to_string_lossy().to_string();
-                    println!("agents");
-                    let mine: Vec<_> = agents.iter().filter(|a| a.cwd == root_str).collect();
-                    if mine.is_empty() {
-                        println!("  (none in this repo)");
-                    }
-                    for a in mine {
-                        println!("  {} {} [{}]", a.pane_id, a.agent, a.agent_status);
-                    }
-                }
-                Err(e) => println!("agents unavailable: {e}"),
-            }
         }
 
         Cmd::Run {
@@ -437,11 +423,10 @@ fn real_main() -> Result<()> {
             from,
             only,
             dry_run,
-            headless,
         } => execute(
             &root,
             cli.config.as_deref(),
-            RunOpts { pipeline, task, base, from, only, dry_run, headless },
+            RunOpts { pipeline, task, base, from, only, dry_run },
         )?,
 
         Cmd::New {
@@ -449,7 +434,8 @@ fn real_main() -> Result<()> {
             prompt,
             pipeline,
             base,
-            headless,
+            images,
+            no_paste,
             fg,
         } => {
             let _ = &name;
@@ -467,8 +453,10 @@ fn real_main() -> Result<()> {
                 None if fg => None,
                 None => Some(ask("task> ").context("no task given")?),
             };
+            // The branch a new stack starts is named after the stack itself.
+            media::collect(&root, &name, &images, !no_paste)?;
             let path = push_stack(&root, cli.config.as_deref(), &name, base, None, true)?;
-            let opts = RunOpts { pipeline, task: prompt, headless, ..Default::default() };
+            let opts = RunOpts { pipeline, task: prompt, ..Default::default() };
             if fg {
                 execute(&path, None, opts)?;
             } else {
@@ -481,7 +469,8 @@ fn real_main() -> Result<()> {
             prompt,
             pipeline,
             branch,
-            headless,
+            images,
+            no_paste,
             fg,
             worker,
         } => {
@@ -506,11 +495,18 @@ fn real_main() -> Result<()> {
             let n = st.stacks[&stack].len() + 1;
             let branch = branch.unwrap_or_else(|| format!("{stack}-{n}"));
 
+            // Only the shell that queued the add has a clipboard or a terminal;
+            // the worker it detaches re-enters here with the images already
+            // staged under the branch it was given.
+            if !worker {
+                media::collect(&root, &branch, &images, !no_paste)?;
+            }
+
             // Queueing happens in the detached worker, not here, so the shell
             // comes straight back even when the tip is still running.
             if !fg && !worker {
                 start_queued_add(
-                    &root, &stack, &branch, prompt.as_deref(), pipeline.as_deref(), headless,
+                    &root, &stack, &branch, prompt.as_deref(), pipeline.as_deref(),
                 )?;
                 return Ok(());
             }
@@ -576,7 +572,7 @@ fn real_main() -> Result<()> {
             execute(
                 std::path::Path::new(&path),
                 None,
-                RunOpts { pipeline, task: prompt, headless, ..Default::default() },
+                RunOpts { pipeline, task: prompt, ..Default::default() },
             )?;
         }
 
@@ -623,18 +619,6 @@ fn real_main() -> Result<()> {
             let dir = entry_path(&root, &entry)?;
             if path_only {
                 println!("{dir}");
-                return Ok(());
-            }
-
-            // Under herdr the session already has a pane; focus that instead of
-            // starting a second agent on the same checkout.
-            if let Some((id, _)) = herdr::workspaces()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|(_, p)| p == &dir)
-            {
-                herdr::workspace_focus(&id)?;
-                println!("focused workspace for {}", entry.branch);
                 return Ok(());
             }
 
@@ -707,6 +691,8 @@ fn real_main() -> Result<()> {
             message,
             agent,
             push,
+            images,
+            no_paste,
         } => {
             let st = Stacks::load(&root)?;
             let (entry, message) = match (target, message) {
@@ -733,17 +719,21 @@ fn real_main() -> Result<()> {
                     .cloned()
                     .context("no agents configured")?,
             };
+            media::collect(&root, &entry.branch, &images, !no_paste)?;
+            let attached = media::materialize(&root, &dir, &entry.branch)?;
+            let message_for_commit = message.clone();
+            let message = media::decorate(&message, &attached);
+
             let mut vars = BTreeMap::new();
             vars.insert("branch".into(), entry.branch.clone());
             vars.insert("repo".into(), dir.to_string_lossy().to_string());
-            let message_for_commit = message.clone();
             let step = config::Step {
                 id: "say".into(),
                 agent: Some(role),
                 prompt: Some(message),
                 ..Default::default()
             };
-            pipeline::Runner::new(dir.clone(), cfg, vars, false, false).run(&[step])?;
+            pipeline::Runner::new(dir.clone(), cfg, vars, false).run(&[step])?;
 
             if push {
                 push_changes(&dir, &entry.branch, &message_for_commit)?;
@@ -1089,14 +1079,9 @@ fn create_worktree(
     {
         bail!("branch `{branch}` already exists");
     }
-    let use_herdr = cfg.backend != Backend::Headless && herdr::inside_session();
-    let mut path = if use_herdr {
-        herdr::worktree_create(branch, base, &from.to_string_lossy())?
-    } else {
-        let dest = worktree_dest(cfg, &from, branch);
-        util::git_worktree_add(&from, branch, base, &dest)?;
-        dest.to_string_lossy().to_string()
-    };
+    let dest = worktree_dest(cfg, &from, branch);
+    util::git_worktree_add(&from, branch, base, &dest)?;
+    let mut path = dest.to_string_lossy().to_string();
     if path.is_empty() {
         path = util::worktree_path(&from, branch).unwrap_or_default();
     }
@@ -1113,7 +1098,6 @@ fn start_queued_add(
     branch: &str,
     prompt: Option<&str>,
     pipeline: Option<&str>,
-    headless: bool,
 ) -> Result<()> {
     if let Some(id) = confirm_step(root, None, pipeline) {
         bail!(
@@ -1158,10 +1142,6 @@ fn start_queued_add(
         args.push("--pipeline".into());
         args.push(p.to_string());
     }
-    if headless {
-        args.push("--headless".into());
-    }
-
     let mut cmd = if which("setsid") {
         let mut c = std::process::Command::new("setsid");
         c.arg(&exe).args(&args);
@@ -1240,10 +1220,6 @@ fn start_detached(
         args.push("--task".into());
         args.push(t.clone());
     }
-    if o.headless {
-        args.push("--headless".into());
-    }
-
     // setsid detaches from this terminal's session, so the run survives the
     // shell going away.
     let mut cmd = if which("setsid") {
@@ -1273,6 +1249,30 @@ fn start_detached(
     println!("  rigg logs {branch} -f");
     println!("  rigg attach {branch}");
     Ok(())
+}
+
+/// Run the configured teardown in a checkout about to be removed.
+///
+/// Reported but never fatal: the removal was asked for, and a branch whose
+/// services will not stop is still a branch the user wants gone. Saying so
+/// matters though - a leaked docker stack is invisible until the disk fills.
+fn teardown(cfg: &Config, dir: &str, branch: &str, base: &str, dry_run: bool) {
+    let Some(cmd) = &cfg.stack.teardown else {
+        return;
+    };
+    let mut vars = BTreeMap::new();
+    vars.insert("branch".to_string(), branch.to_string());
+    vars.insert("base".to_string(), base.to_string());
+    vars.insert("repo".to_string(), dir.to_string());
+    let cmd = util::render(cmd, &vars);
+    if dry_run {
+        println!("  would run teardown: {}", cmd.lines().next().unwrap_or("").trim());
+        return;
+    }
+    println!("  teardown: {}", cmd.lines().next().unwrap_or("").trim());
+    if let Err(e) = util::shell_quiet(std::path::Path::new(dir), &cmd, &[]) {
+        println!("  teardown failed for {branch}: {e}");
+    }
 }
 
 /// Add a label to the PR for `branch`.
@@ -1373,7 +1373,6 @@ struct RunOpts {
     from: Option<String>,
     only: Vec<String>,
     dry_run: bool,
-    headless: bool,
 }
 
 /// Load the config, pick the pipeline and run it against `root`.
@@ -1418,6 +1417,16 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         None => String::new(),
     };
 
+    // Not on a dry run: this writes files, and the point of --dry-run is that
+    // it touches nothing. It also consumes the staging, which a rehearsal must
+    // not do to the real run that follows it.
+    let task = if o.dry_run {
+        task
+    } else {
+        let attached = media::materialize(root, root, &branch)?;
+        media::decorate(&task, &attached)
+    };
+
     let mut vars = BTreeMap::new();
     vars.insert("task".into(), task);
     vars.insert("branch".into(), branch.clone());
@@ -1447,7 +1456,7 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     for (i, line) in wrap(task.trim(), 68).into_iter().enumerate() {
         println!("{}  {line}", if i == 0 { "task" } else { "    " });
     }
-    let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run, o.headless);
+    let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run);
     let outcome = runner.run(&steps);
     if !o.dry_run {
         record_status(
@@ -1461,9 +1470,6 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     }
     outcome?;
     println!("\nrigg: pipeline complete");
-    if !o.dry_run {
-        herdr::notify(&format!("rigg: {branch} pipeline complete"));
-    }
     Ok(())
 }
 
@@ -1531,16 +1537,9 @@ fn push_stack(
              `git branch -d {branch}` if it is finished."
         );
     }
-    // Herdr gives the worktree its own workspace; without it (or in a headless
-    // setup) plain git is enough and keeps rigg usable on its own.
-    let use_herdr = cfg.backend != Backend::Headless && herdr::inside_session();
-    let mut path = if use_herdr {
-        herdr::worktree_create(branch, &base, &from.to_string_lossy())?
-    } else {
-        let dest = worktree_dest(&cfg, &from, branch);
-        util::git_worktree_add(&from, branch, &base, &dest)?;
-        dest.to_string_lossy().to_string()
-    };
+    let dest = worktree_dest(&cfg, &from, branch);
+    util::git_worktree_add(&from, branch, &base, &dest)?;
+    let mut path = dest.to_string_lossy().to_string();
     if path.is_empty() {
         path = util::worktree_path(&from, branch).unwrap_or_default();
     }
@@ -1645,17 +1644,19 @@ fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> R
         return Ok(());
     }
     if !yes {
+        for e in entries.iter().rev() {
+            if let Ok(dir) = entry_path(root, e) {
+                teardown(&cfg, &dir, &e.branch, &e.base, true);
+            }
+        }
         println!("\ndry run; pass --yes to remove");
         return Ok(());
     }
 
-    let ws = herdr::workspaces().unwrap_or_default();
     // Newest first: a branch below is the base of the one above it.
     for e in entries.iter().rev() {
         if let Some(dir) = entry_path(root, e).ok() {
-            if let Some((id, _)) = ws.iter().find(|(_, p)| p == &dir) {
-                let _ = herdr::workspace_close(id);
-            }
+            teardown(&cfg, &dir, &e.branch, &e.base, false);
             let mut args = vec!["worktree", "remove", &dir];
             if force {
                 args.push("--force");
@@ -1665,6 +1666,7 @@ fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> R
                 continue;
             }
         }
+        media::discard(root, &e.branch);
         let flag = if force { "-D" } else { "-d" };
         match util::git(root, &["branch", flag, &e.branch]) {
             Ok(_) => println!("  removed {}", e.branch),
@@ -1744,28 +1746,23 @@ fn prune(
     println!("\n{} merged worktree(s)", candidates.len());
 
     if !yes {
+        for (p, b) in &candidates {
+            teardown(&cfg, p, b, &trunk, true);
+        }
         println!("dry run; pass --yes to remove them");
         return Ok(());
     }
 
-    let ws = herdr::workspaces().unwrap_or_default();
     let in_use = util::cwds_in_use();
     let mut removed = 0;
     let mut failed = 0;
     for (p, b) in &candidates {
-        match ws.iter().find(|(_, path)| path == p) {
-            // Closing the workspace ends the session that lives in it.
-            Some((id, _)) => {
-                let _ = herdr::workspace_close(id);
-            }
-            // Nothing of ours owns it, so leave it alone while it is someone's
-            // working directory.
-            None if in_use.contains(p) => {
-                println!("skipped {b}: in use by a running process");
-                continue;
-            }
-            None => {}
+        // Leave a checkout alone while it is someone's working directory.
+        if in_use.contains(p) {
+            println!("skipped {b}: in use by a running process");
+            continue;
         }
+        teardown(&cfg, p, b, &trunk, false);
         match util::git(root, &["worktree", "remove", p]) {
             Ok(_) => {
                 removed += 1;
@@ -1802,79 +1799,22 @@ fn prune(
     Ok(())
 }
 
-fn doctor(root: &std::path::Path, cfg_path: Option<&str>, force_headless: bool) -> Result<()> {
+fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
     let mut problems = 0;
     let cfg = Config::load(root, cfg_path);
 
-    // Only the backends actually in use are worth checking: a headless-only
-    // config needs neither a herdr session nor the integration hooks.
-    let mut herdr_kinds: Vec<String> = Vec::new();
-    let mut headless_bins: Vec<(String, String)> = Vec::new();
-    match &cfg {
-        Ok(c) => {
-            for (role, a) in &c.agents {
-                let backend = if force_headless {
-                    Backend::Headless
-                } else {
-                    c.backend_for(role)
-                };
-                match backend {
-                    Backend::Herdr => herdr_kinds.push(a.kind.clone()),
-                    Backend::Headless => headless_bins.push((role.clone(), headless::binary(a))),
-                }
-            }
-        }
-        Err(_) if force_headless => headless_bins.push(("?".into(), "claude".into())),
-        Err(_) => herdr_kinds = vec!["claude".into(), "opencode".into()],
-    }
-    herdr_kinds.sort();
-    herdr_kinds.dedup();
+    // Each step is one non-interactive turn, so the only thing to check per
+    // role is that the binary it would spawn exists.
+    let bins: Vec<(String, String)> = match &cfg {
+        Ok(c) => c
+            .agents
+            .iter()
+            .map(|(role, a)| (role.clone(), headless::binary(a)))
+            .collect(),
+        Err(_) => vec![("?".into(), "claude".into())],
+    };
 
-    println!(
-        "backend        {}",
-        match (herdr_kinds.is_empty(), headless_bins.is_empty()) {
-            (false, false) => "herdr + headless".to_string(),
-            (true, false) => Backend::Headless.as_str().to_string(),
-            _ => Backend::Herdr.as_str().to_string(),
-        }
-    );
-
-    if !herdr_kinds.is_empty() {
-        println!("herdr binary   {}", herdr::bin());
-        if herdr::inside_session() {
-            println!("herdr session  yes (workspace {})",
-                herdr::current_workspace().unwrap_or_else(|| "?".into()));
-        } else {
-            println!("herdr session  NO - run rigg from inside a herdr pane");
-            problems += 1;
-        }
-
-        // Agent state detection is only reliable with the integration hooks in place.
-        let status = herdr::call(&["integration", "status"]).unwrap_or_default();
-        for kind in &herdr_kinds {
-            let line = status
-                .lines()
-                .find(|l| l.starts_with(&format!("{kind}:")))
-                .unwrap_or("");
-            let state = line.split_once(':').map(|(_, r)| r.trim()).unwrap_or("");
-            if state.starts_with("current") {
-                println!("integration    {kind}: {state}");
-            } else if state.is_empty() || state.starts_with("not installed") {
-                println!(
-                    "integration    {kind}: NOT INSTALLED - agent state will be guessed. \
-                     Run `herdr integration install {kind}`"
-                );
-                problems += 1;
-            } else {
-                println!(
-                    "integration    {kind}: {state} - run `herdr integration install {kind}` to update"
-                );
-                problems += 1;
-            }
-        }
-    }
-
-    for (role, bin) in &headless_bins {
+    for (role, bin) in &bins {
         let label = format!("agent {role}");
         if which(bin) {
             println!("{label:<14} {bin} found");
@@ -1939,51 +1879,6 @@ fn ask(prompt: &str) -> Result<String> {
         bail!("nothing entered");
     }
     Ok(line)
-}
-
-/// Invoked by the Herdr plugin action. The action runs detached from any
-/// terminal, so open a pane in the invoking workspace and run there.
-fn plugin_run() -> Result<()> {
-    // The action context names the workspace the user actually invoked from;
-    // HERDR_PANE_ID belongs to the plugin host, not that workspace.
-    let cwd = plugin_context_cwd()
-        .or_else(|| {
-            std::env::var("HERDR_PANE_ID")
-                .ok()
-                .and_then(|p| herdr::pane_cwd(&p).ok())
-        })
-        .context("could not determine a working directory for the pipeline")?;
-
-    let exe = std::env::current_exe()?;
-    let exe = exe.to_string_lossy().to_string();
-    // Keep the pane alive after rigg exits so failures stay readable.
-    let script = format!(
-        "{} run; printf '\\n[rigg finished - press enter to close] '; read _",
-        sh_quote(&exe)
-    );
-    // `herdr pane run` hands the command to a shell as text rather than exec'ing
-    // argv, so the script has to survive one round of shell parsing.
-    let cmd = format!("sh -c {}", sh_quote(&script));
-    herdr::split_and_run(&cwd, &[&cmd])?;
-    Ok(())
-}
-
-/// Single-quote a string for safe re-parsing by a shell.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn plugin_context_cwd() -> Option<String> {
-    let raw = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok()?;
-    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    for key in ["workspace_cwd", "focused_pane_cwd"] {
-        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn which(cmd: &str) -> bool {
