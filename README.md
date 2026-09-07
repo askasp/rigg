@@ -126,6 +126,21 @@ end of the prompt, so the agent reads them as files. That directory is added to
 Needs `wl-paste` (Wayland) or `xclip` (X11) for the clipboard; `--image` works
 without either.
 
+`rigg continue <stack>` takes a branch further than the pipeline it was run
+with, picking up after the last step that finished — so a branch run with a
+short pipeline can be given the rest later:
+
+```sh
+rigg continue billing --pipeline full-preview
+```
+
+A step that *failed* is picked up again; one that finished is stepped over. The
+step and the pipeline are recorded as the run goes, rather than read back out
+of the log, because a foreground run writes no log.
+
+This is not `--from`: that needs you to know which step, and to name one the
+pipeline actually contains.
+
 `rigg stop <stack>` cancels a run in flight. The run is its own process group,
 so the agent and any shell step under it go down with it rather than being
 orphaned; the branch is then marked `stopped` rather than failed.

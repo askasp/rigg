@@ -42,6 +42,7 @@ HELP_GROUPS = [
         ("say <stack> <message>", "a follow-up turn in that stack's session"),
         ("stop <stack>", "cancel it — `cancel` works too"),
         ("retry <stack> [step]", "run it again, from a step if you name one"),
+        ("continue <stack> [pipeline]", "take it further: `continue foo full-preview`"),
     ]),
     ("Have a look", [
         ("stacks", "this channel's stacks and how they are doing"),
@@ -547,6 +548,39 @@ def pipeline_of(repo: Path, stack: str) -> str | None:
     return m.group(1) if m else None
 
 
+def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """Take a branch further than the pipeline it was started with.
+
+    Distinct from `retry`, which runs the same pipeline again: this one picks
+    up after the last step that finished, so a branch run with `preview` can
+    be given the Copilot round it never had.
+    """
+    parts = rest.split()
+    if not parts:
+        say("`continue <stack> [pipeline]`")
+        return
+    stack = resolve(repo, prefix, parts[0], say)
+    if stack is None:
+        return
+    args = ["continue", stack]
+    if len(parts) > 1:
+        name, ambiguous = match_pipeline(repo, parts[1])
+        if ambiguous:
+            say(ambiguous)
+            return
+        if name is None:
+            say(f"`{parts[1]}` is not a pipeline here — `pipelines` lists them")
+            return
+        args += ["--pipeline", name]
+    code, out = run_rigg(repo, args, timeout=300)
+    posted = say(f"```\n{out[:1500]}\n```" if out else
+                 ("continuing" if code == 0 else "could not continue it"))
+    # Point progress at this thread, so the answer lands where it was asked.
+    ts = posted.get("ts") if isinstance(posted, dict) else None
+    if ts and code == 0:
+        remember_thread(repo, stack, channel, ts)
+
+
 def cmd_urls(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     """Whatever links the last run printed - preview URLs, PRs."""
     if not rest:
@@ -630,6 +664,7 @@ COMMANDS = {
     "stop": cmd_stop,
     "cancel": cmd_stop,
     "retry": cmd_retry,
+    "continue": cmd_continue,
     "urls": cmd_urls,
     "rm": cmd_rm,
     "remove": cmd_rm,

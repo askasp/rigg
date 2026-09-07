@@ -20,6 +20,7 @@ _rigg() {
     'run:Run the pipeline here'
     'status:Show branch and stack state'
     'stop:Stop a run that is still going'
+    'continue:Take a branch further than the pipeline it ran'
     'pipelines:List the pipeline names'
     'features:Show the optional parts of the pipeline'
     'doctor:Check the environment'
@@ -36,7 +37,7 @@ _rigg() {
     return
   fi
   case "${words[2]}" in
-    add|say|attach|logs|stop) (( CURRENT == 3 )) && _rigg_stacks ;;
+    add|say|attach|logs|stop|continue) (( CURRENT == 3 )) && _rigg_stacks ;;
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
   esac
 }

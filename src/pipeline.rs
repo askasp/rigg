@@ -12,6 +12,9 @@ pub struct Runner {
     pub cfg: Config,
     pub vars: BTreeMap<String, String>,
     pub dry_run: bool,
+    /// The id of the step last attempted, so a caller can record where the
+    /// run got to without having to read its own log back.
+    pub at: Option<String>,
 }
 
 impl Runner {
@@ -26,6 +29,7 @@ impl Runner {
             cfg,
             vars,
             dry_run,
+            at: None,
         }
     }
 
@@ -141,6 +145,7 @@ impl Runner {
             println!("\n{:-<4} {head} {:-<width$} {}", "", "", clock(),
                 width = 64usize.saturating_sub(head.len()));
             let step_started = std::time::Instant::now();
+            self.at = Some(step.id.clone());
 
             if !self.should_run(step)? {
                 println!("  skipped: no matching changed files");

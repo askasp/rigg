@@ -31,7 +31,8 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | --- | --- |
 | `say <stack> <message>` | a follow-up turn in that stack's session |
 | `stop <stack>` | cancel it (`cancel` also works) |
-| `retry <stack> [step]` | run it again, from a step if you name one |
+| `retry <stack> [step]` | run the same pipeline again, from a step if you name one |
+| `continue <stack> [pipeline]` | take it further than it was started with |
 
 **Have a look**
 

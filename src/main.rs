@@ -208,6 +208,20 @@ enum Cmd {
     Pipelines,
     /// Show the optional parts, what each contains, and who turns it on.
     Features,
+    /// Take a branch further: run more of a pipeline than it has had, picking
+    /// up after the last step it finished.
+    Continue {
+        /// Stack or branch. Omit to choose.
+        target: Option<String>,
+        /// Pipeline to carry on with. Defaults to the one the branch last ran,
+        /// so `--pipeline full-preview` is how a `preview` branch gets the
+        /// Copilot round it never had.
+        #[arg(long)]
+        pipeline: Option<String>,
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        fg: bool,
+    },
     /// Stop a run that is still going.
     Stop {
         /// Stack or branch. Omit to choose.
@@ -555,6 +569,87 @@ fn real_main() -> Result<()> {
                 start_detached(&root, &root, &branch, opts)?;
             } else {
                 execute(&root, cli.config.as_deref(), opts)?;
+            }
+        }
+
+        Cmd::Continue { target, pipeline, fg } => {
+            let st = Stacks::load(&root)?;
+            let entry = match target {
+                Some(t) => resolve_target(&root, &st, &t)?,
+                None => pick_stack(&root, &st)?,
+            };
+            if let Some(pid) = running_pid(&root, &entry.branch) {
+                bail!("`{}` is still running (pid {pid})", entry.branch);
+            }
+            let dir = entry_path(&root, &entry)?;
+            let dirp = std::path::Path::new(&dir);
+            let cfg = Config::load(dirp, cli.config.as_deref())?;
+
+            // What to carry on with: what was asked for, else what it ran last.
+            let recorded = last_attempted(&root, &entry.branch);
+            let pipeline = pipeline
+                .or_else(|| recorded.as_ref().and_then(|(p, _)| p.clone()))
+                .or_else(|| logged_pipeline(&root, &entry.branch));
+            let steps = pipeline_steps(&cfg, pipeline.as_deref(), &[], &[])?;
+
+            // The log records each step by its description, or its id when it
+            // has none - which is how a step is matched across two pipelines
+            // that both contain it but number it differently.
+            // The recorded id is exact. Runs from before it was recorded only
+            // have the log, where a step appears by its description.
+            let at = match recorded.map(|(_, id)| id) {
+                Some(id) => steps.iter().position(|s| s.id == id).with_context(|| {
+                    format!(
+                        "`{}` stopped at `{id}`, which is not in pipeline `{}`. \
+                         Name a pipeline that has it.",
+                        entry.branch,
+                        pipeline.as_deref().unwrap_or("steps")
+                    )
+                })?,
+                None => {
+                    let last = last_step(&root, &entry.branch).with_context(|| {
+                        format!("`{}` has no run to continue from", entry.branch)
+                    })?;
+                    let label =
+                        last.split_once(' ').map_or(last.clone(), |(_, l)| l.to_string());
+                    steps
+                        .iter()
+                        .position(|s| s.description.as_deref().unwrap_or(&s.id) == label)
+                        .with_context(|| {
+                            format!(
+                                "`{}` stopped at `{label}`, which is not in pipeline \
+                                 `{}`. Name a pipeline that has it.",
+                                entry.branch,
+                                pipeline.as_deref().unwrap_or("steps")
+                            )
+                        })?
+                }
+            };
+
+            // A step that failed is picked up again; one that finished is
+            // stepped over.
+            let failed = last_status(&root, &entry.branch).is_some_and(|s| s != "ok");
+            let next = if failed { at } else { at + 1 };
+            if next >= steps.len() {
+                println!(
+                    "`{}` has already finished `{}`",
+                    entry.branch,
+                    pipeline.as_deref().unwrap_or("steps")
+                );
+                return Ok(());
+            }
+            let from = steps[next].id.clone();
+            println!(
+                "continuing `{}` on `{}` from `{from}` ({} step(s) left)",
+                entry.branch,
+                pipeline.as_deref().unwrap_or("steps"),
+                steps.len() - next
+            );
+            let opts = RunOpts { pipeline, from: Some(from), ..Default::default() };
+            if fg {
+                execute(dirp, None, opts)?;
+            } else {
+                start_detached(&root, dirp, &entry.branch, opts)?;
             }
         }
 
@@ -1077,6 +1172,22 @@ fn pick_stack(root: &std::path::Path, st: &Stacks) -> Result<Entry> {
     resolve_target(root, st, &answer)
 }
 
+/// Where the last attempted step id is kept for a branch.
+fn step_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
+    Ok(util::state_dir(root)?
+        .join("run")
+        .join(format!("{}.step", branch.replace('/', "-"))))
+}
+
+/// The pipeline a branch last ran, and the step it got to.
+fn last_attempted(root: &std::path::Path, branch: &str) -> Option<(Option<String>, String)> {
+    let raw = std::fs::read_to_string(step_path(root, branch).ok()?).ok()?;
+    let mut lines = raw.lines();
+    let pipeline = lines.next()?.trim().to_string();
+    let id = lines.next()?.trim().to_string();
+    (!id.is_empty()).then(|| ((!pipeline.is_empty()).then_some(pipeline), id))
+}
+
 fn status_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> {
     Ok(util::state_dir(root)?
         .join("run")
@@ -1487,6 +1598,35 @@ fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// A pipeline's steps with the parts that are switched off removed.
+fn pipeline_steps(
+    cfg: &Config,
+    pipeline: Option<&str>,
+    with: &[String],
+    without: &[String],
+) -> Result<Vec<config::Step>> {
+    let mut steps = cfg.steps_for(pipeline)?;
+    let features = cfg.features_for(pipeline, with, without)?;
+    let off: Vec<&str> = features
+        .iter()
+        .filter(|(_, on)| !**on)
+        .map(|(f, _)| f.as_str())
+        .collect();
+    if !off.is_empty() {
+        steps.retain(|s| s.feature.as_deref().is_none_or(|f| !off.contains(&f)));
+    }
+    Ok(steps)
+}
+
+/// Which pipeline a branch last ran, from the header of its log.
+fn logged_pipeline(root: &std::path::Path, branch: &str) -> Option<String> {
+    let text = read_tail(&log_path(root, branch).ok()?, 4096)?;
+    let line = text.lines().find(|l| l.starts_with("rigg  "))?;
+    let (_, rest) = line.split_once("pipeline ")?;
+    let name = rest.split(&[',', ' '][..]).next()?;
+    (name != "steps").then(|| name.to_string())
+}
+
 /// Stop a detached run and everything it started.
 ///
 /// The run is its own process group - `start_detached` puts it there with
@@ -1657,17 +1797,9 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         .or_else(|| st.find(&branch).map(|e| e.base.clone()))
         .unwrap_or_else(|| cfg.stack.trunk.clone());
 
-    let mut steps = cfg.steps_for(o.pipeline.as_deref())?;
-    let features =
-        cfg.features_for(o.pipeline.as_deref(), &o.with_features, &o.without_features)?;
-    let off: Vec<&str> = features
-        .iter()
-        .filter(|(_, on)| !**on)
-        .map(|(f, _)| f.as_str())
-        .collect();
-    if !off.is_empty() {
-        steps.retain(|s| s.feature.as_deref().is_none_or(|f| !off.contains(&f)));
-    }
+    let mut steps = pipeline_steps(
+        &cfg, o.pipeline.as_deref(), &o.with_features, &o.without_features,
+    )?;
     if steps.is_empty() {
         bail!("pipeline has no steps");
     }
@@ -1749,6 +1881,18 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run);
     let outcome = runner.run(&steps);
     if !o.dry_run {
+        // Where it got to, recorded rather than left to be read back out of a
+        // log - which a foreground run does not even write.
+        if let Some(at) = &runner.at {
+            // The pipeline goes with it: continuing needs to know which list
+            // that step belonged to, and a foreground run writes no log to
+            // read it back out of.
+            let record = format!("{}\n{at}\n", o.pipeline.as_deref().unwrap_or(""));
+            let _ = step_path(root, &branch).map(|p| {
+                p.parent().map(std::fs::create_dir_all);
+                std::fs::write(p, record)
+            });
+        }
         record_status(
             root,
             &branch,
