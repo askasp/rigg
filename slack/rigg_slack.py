@@ -231,14 +231,22 @@ def git_common_dir(repo: Path) -> Path:
 
 
 def ts_of(posted: object) -> str | None:
-    """The timestamp of a message just posted, whatever `say` handed back.
+    """The thread a message just posted belongs to, whatever `say` handed back.
+
+    Not the message's own ts. An answer is posted *into* the thread that asked
+    for it, so its ts identifies a reply inside that thread and no later reply
+    there ever arrives carrying it - which is why `summary` in a run's own
+    thread still asked which stack. `thread_ts` off the message is the thread
+    itself, and a message that starts a thread (a listing) has none yet, so
+    there its ts is the thread.
 
     Bolt returns a SlackResponse, which is dict-*like* but not a dict - so an
     isinstance check against dict quietly produced None, and not one of the
     threads this was meant to record ever was.
     """
     try:
-        return posted.get("ts")  # type: ignore[attr-defined]
+        message = posted.get("message") or {}  # type: ignore[attr-defined]
+        return message.get("thread_ts") or posted.get("ts")  # type: ignore[attr-defined]
     except (AttributeError, TypeError):
         return None
 
@@ -1503,7 +1511,7 @@ def main() -> int:
                     channel.repo, event["channel"], event.get("thread_ts")
                 )
                 if in_thread:
-                    rest = f"{in_thread.split('/', 1)[1]} {rest}".strip()
+                    rest = f"{in_thread.split('/', 1)[-1]} {rest}".strip()
                 elif ask_session(channel.repo, event.get("thread_ts")) is not None and \
                         ask_session(channel.repo, event.get("thread_ts")).exists():
                     # This thread is a question, not a branch. Guessing a stack

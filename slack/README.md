@@ -148,9 +148,15 @@ you mean:
 @rigg continue +copilot
 ```
 
-That works in any thread belonging to a stack: the one `stacks` posted, or the
-one a run reports into. It applies to `add`, `say`, `stop`, `retry`,
-`continue`, `urls`, `logs` and `rm`.
+That works in any thread belonging to a stack: the one `stacks` posted, the one
+a run reports into, or the one you started the work in. It applies to `add`,
+`say`, `summary`, `stop`, `retry`, `continue`, `urls`, `logs` and `rm`.
+
+A thread is recorded by its own id rather than by the id of the message the
+answer happened to be. An answer is posted *into* the thread that asked for it,
+so its id belongs to a reply inside that thread and no later reply there
+arrives carrying it - which is why this used to work only in the threads
+`stacks` posts, those being the only ones the bridge starts itself.
 
 A listing leaves out any stack in this channel whose every branch has landed
 on the trunk — a merged stack is finished with, and the next piece of work
