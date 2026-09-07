@@ -7,6 +7,7 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::collections::BTreeMap;
 
@@ -46,6 +47,47 @@ enum Cmd {
         pipeline: Option<String>,
         #[arg(long)]
         base: Option<String>,
+        /// Attach an image file to the task. Repeatable.
+        #[arg(long = "image", value_name = "PATH")]
+        images: Vec<String>,
+        /// Do not look at the clipboard for an image.
+        #[arg(long)]
+        no_paste: bool,
+        /// Run agent steps on another kind: `--agent opencode` swaps every
+        /// role, `--agent reviewer=opencode` swaps one. Repeatable.
+        #[arg(long = "agent", value_name = "[ROLE=]KIND")]
+        agents: Vec<String>,
+        /// Set a prompt placeholder for this run: `--var effort=high` fills
+        /// {{effort}}. Repeatable; overrides [vars] in the config.
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// Turn an optional part of the pipeline on for this run.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn one off for this run.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
+        /// Run in this terminal instead of detaching.
+        #[arg(long)]
+        fg: bool,
+    },
+    /// Take an existing branch into a stack and run a pipeline on it.
+    Adopt {
+        /// The branch to take over. It is used as it stands: nothing is cut
+        /// from it, and removing the stack later leaves it alone.
+        branch: String,
+        /// A task for the run, where the pipeline wants one. A pipeline that
+        /// only reviews or previews the branch needs none.
+        prompt: Option<String>,
+        #[arg(long)]
+        pipeline: Option<String>,
+        /// What the branch is stacked on - what a PR would target and what a
+        /// review diffs against. Defaults to the trunk.
+        #[arg(long)]
+        base: Option<String>,
+        /// Name the stack. Defaults to the branch name.
+        #[arg(long)]
+        stack: Option<String>,
         /// Attach an image file to the task. Repeatable.
         #[arg(long = "image", value_name = "PATH")]
         images: Vec<String>,
@@ -391,7 +433,7 @@ bindkey '^X?' rigg-keys-widget
 "#;
 
 /// Subcommands that can be prefixed with a pipeline name.
-const PIPELINE_VERBS: [&str; 3] = ["new", "add", "run"];
+const PIPELINE_VERBS: [&str; 4] = ["new", "adopt", "add", "run"];
 
 /// Accept `rigg <pipeline> new <name> "<prompt>"` by rewriting it into
 /// `rigg new <name> "<prompt>" --pipeline <pipeline>`.
@@ -833,6 +875,51 @@ fn real_main() -> Result<()> {
             }
         }
 
+        Cmd::Adopt {
+            branch,
+            prompt,
+            pipeline,
+            base,
+            stack,
+            images,
+            no_paste,
+            agents,
+            vars,
+            with_features,
+            without_features,
+            fg,
+        } => {
+            // Before the task is asked for: a name that reaches no branch
+            // should say so, not be answered with a question about the task.
+            let (branch, remote) = adoptable(&util::main_checkout(&root)?, &branch)?;
+            let mut opts = RunOpts {
+                pipeline, task: prompt, agents, vars, with_features, without_features,
+                ..Default::default()
+            };
+            // `new` always has a task, because a branch with nothing to do is
+            // not worth cutting. Here the branch already exists, so a run that
+            // only reviews or previews it needs none - and one is asked for
+            // only when a step would otherwise be handed an empty {{task}}.
+            if opts.task.is_none() && !fg && needs_a_task(&root, cli.config.as_deref(), &opts) {
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "a step in this pipeline wants a task and none was given: \
+                         `rigg adopt {branch} \"...\"`"
+                    );
+                }
+                opts.task = Some(ask("task> ")?);
+            }
+            media::collect(&root, &branch, &images, !no_paste)?;
+            let path = adopt_stack(
+                &root, cli.config.as_deref(), &branch, remote.as_deref(), base, stack,
+            )?;
+            if fg {
+                execute(&path, None, opts)?;
+            } else {
+                start_detached(&root, &path, &branch, opts)?;
+            }
+        }
+
         Cmd::Add {
             stack,
             prompt,
@@ -938,6 +1025,7 @@ fn real_main() -> Result<()> {
                     base: base.clone(),
                     path: Some(path.clone()),
                     pr: None,
+                    adopted: false,
                 });
             }
             st.save(&root)?;
@@ -1573,6 +1661,7 @@ fn start_queued_add(
         base: base.clone(),
         path: None,
         pr: None,
+        adopted: false,
     });
     st.save(root)?;
 
@@ -2296,10 +2385,147 @@ fn push_stack(
         base,
         path: Some(path.clone()),
         pr: None,
+        adopted: false,
     });
     st.save(root)?;
     println!("stack `{target}` is now {} deep", st.stacks[&target].len());
     println!("worktree at {path}");
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// The branch `adopt` should take, and the remote-tracking ref to create it
+/// from when it is not local yet. Settled before anything is created, so a
+/// name that reaches no branch is reported as that rather than as whatever
+/// the next step happens to notice.
+fn adoptable(from: &std::path::Path, branch: &str) -> Result<(String, Option<String>)> {
+    let head = |b: &str| {
+        util::git(from, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")]).is_ok()
+    };
+    // `origin/feature/login` is how a branch is named when you have just read
+    // it off `git branch -a` or a PR page, so take the remote off rather than
+    // reporting that no such branch exists.
+    let mut branch = branch.to_string();
+    if !head(&branch) {
+        let split = branch.split_once('/').map(|(a, b)| (a.to_string(), b.to_string()));
+        if let Some((remote, rest)) = split {
+            let known = util::git(from, &["remote"])
+                .map(|o| o.lines().any(|r| r.trim() == remote))
+                .unwrap_or(false);
+            let tracked = util::git(
+                from,
+                &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{branch}")],
+            )
+            .is_ok();
+            if known && tracked && !rest.is_empty() {
+                println!("`{branch}` is a remote-tracking name; the branch is `{rest}`");
+                branch = rest;
+            }
+        }
+    }
+    if head(&branch) {
+        return Ok((branch, None));
+    }
+    // A branch only on a remote is worth adopting too - that is the colleague's
+    // PR case - so it is materialised as a local branch tracking it.
+    match util::remote_branch(from, &branch) {
+        Some(r) => Ok((branch, Some(r))),
+        None => bail!(
+            "no branch `{branch}`, here or on a remote. `git fetch` first if it \
+             is someone else's, or `rigg new {branch} \"...\"` to start it."
+        ),
+    }
+}
+
+/// Take an existing branch into a stack: a worktree on the branch itself,
+/// recorded so every other verb reaches it by name.
+///
+/// The difference from `push_stack` is that nothing is created. The branch is
+/// someone's already - a colleague's PR, something you cut by hand - and the
+/// point is to put a pipeline on it as it stands: a preview, a review, and
+/// then `add` to carry it further.
+fn adopt_stack(
+    root: &std::path::Path,
+    cfg_path: Option<&str>,
+    branch: &str,
+    remote: Option<&str>,
+    base: Option<String>,
+    stack_name: Option<String>,
+) -> Result<std::path::PathBuf> {
+    let cfg = Config::load(root, cfg_path).unwrap_or_default();
+    let mut st = Stacks::load(root)?;
+    let from = util::main_checkout(root)?;
+
+    if let Some(name) = st.stack_of(branch) {
+        bail!(
+            "`{branch}` is already in stack `{name}`. Take it further with \
+             `rigg continue {name}`, or talk to it with `rigg say {name} \"...\"`."
+        );
+    }
+
+    let target = stack_name.unwrap_or_else(|| branch.to_string());
+    let is_new = !st.stacks.contains_key(&target);
+    let base = base
+        .or_else(|| st.tip_of(&target).map(|e| e.branch.clone()))
+        .unwrap_or_else(|| cfg.stack.trunk.clone());
+    if util::git(&from, &["rev-parse", "--verify", "--quiet", &base]).is_err() {
+        bail!("no ref `{base}` to stack `{branch}` on; pass --base <ref>");
+    }
+    // The base is what a review diffs against and what a PR targets, so a base
+    // sharing no history with the branch would quietly review the whole repo.
+    if util::git(&from, &["merge-base", &base, remote.unwrap_or(branch)]).is_err() {
+        println!(
+            "note: `{branch}` and `{base}` share no history, so a step that \
+             diffs them sees everything. Pass --base <ref> if that is wrong."
+        );
+    }
+
+    // git allows a branch in one worktree at a time, so an existing checkout is
+    // the one to use rather than a collision to report - unless it is the main
+    // one, which is not rigg's to take over.
+    let existing = util::worktree_path(&from, branch);
+    if existing.as_deref().map(std::path::Path::new) == Some(from.as_path()) {
+        bail!(
+            "`{branch}` is checked out in the main repo at {}, so it cannot \
+             have a worktree of its own. Switch that checkout to another \
+             branch, then adopt it again.",
+            from.display()
+        );
+    }
+
+    if is_new {
+        println!("starting stack `{target}` on the existing branch {branch} (base {base})");
+    } else {
+        println!("adding `{branch}` to stack `{target}` (base {base})");
+    }
+    let path = match existing {
+        Some(p) => {
+            println!("using the worktree already on `{branch}` at {p}");
+            p
+        }
+        None => {
+            let dest = worktree_dest(&cfg, &from, branch);
+            util::git_worktree_checkout(&from, branch, remote, &dest)?;
+            let mut path = dest.to_string_lossy().to_string();
+            if path.is_empty() {
+                path = util::worktree_path(&from, branch).unwrap_or_default();
+            }
+            if path.is_empty() {
+                bail!("worktree for `{branch}` was created but its path could not be resolved");
+            }
+            println!("worktree at {path}");
+            path
+        }
+    };
+
+    st.stacks.entry(target.clone()).or_default().push(Entry {
+        branch: branch.to_string(),
+        base,
+        path: Some(path.clone()),
+        pr: None,
+        adopted: true,
+    });
+    st.save(root)?;
+    println!("stack `{target}` is now {} deep", st.stacks[&target].len());
     Ok(std::path::PathBuf::from(path))
 }
 
@@ -2349,11 +2575,14 @@ fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> R
             .and_then(|d| util::git(std::path::Path::new(d), &["status", "--porcelain"]).ok())
             .map(|o| o.lines().count())
             .unwrap_or(0);
-        let unmerged = util::git(
-            root,
-            &["merge-base", "--is-ancestor", &format!("refs/heads/{}", e.branch), &trunk],
-        )
-        .is_err();
+        // Only a branch rigg would delete has to be on the trunk first. An
+        // adopted one is kept either way, so its commits are not at stake.
+        let unmerged = !e.adopted
+            && util::git(
+                root,
+                &["merge-base", "--is-ancestor", &format!("refs/heads/{}", e.branch), &trunk],
+            )
+            .is_err();
 
         let mut notes = Vec::new();
         if running {
@@ -2368,9 +2597,14 @@ fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> R
         if !notes.is_empty() && !force {
             blocked.push(e.branch.clone());
         }
+        let verdict = if notes.is_empty() || force { "remove" } else { "KEEP  " };
+        // Said here rather than only when it happens: "remove" against a
+        // branch rigg is not going to delete would otherwise read as a threat.
+        if e.adopted {
+            notes.push("adopted, so the branch itself is kept".to_string());
+        }
         println!(
-            "  {} {}{}",
-            if notes.is_empty() || force { "remove" } else { "KEEP  " },
+            "  {verdict} {}{}",
             e.branch,
             if notes.is_empty() {
                 String::new()
@@ -2412,6 +2646,12 @@ fn remove_stack(root: &std::path::Path, name: &str, yes: bool, force: bool) -> R
             }
         }
         media::discard(root, &e.branch);
+        // An adopted branch was here before rigg was: give the checkout back
+        // and leave the branch, which is someone else's to delete.
+        if e.adopted {
+            println!("  removed the checkout for {} (branch kept: adopted)", e.branch);
+            continue;
+        }
         let flag = if force { "-D" } else { "-d" };
         match util::git(root, &["branch", flag, &e.branch]) {
             Ok(_) => println!("  removed {}", e.branch),
@@ -2499,6 +2739,9 @@ fn prune(
     }
 
     let in_use = util::cwds_in_use();
+    // An adopted branch is kept even when its worktree goes: rigg did not
+    // create it, so it is not rigg's to delete.
+    let stacks = Stacks::load(root)?;
     let mut removed = 0;
     let mut failed = 0;
     for (p, b) in &candidates {
@@ -2513,7 +2756,8 @@ fn prune(
                 removed += 1;
                 // The branch is an ancestor of the trunk, so `-d` is safe: it
                 // refuses anything not actually merged.
-                if !keep_branches {
+                let adopted = stacks.find(b).is_some_and(|e| e.adopted);
+                if !keep_branches && !adopted {
                     let _ = util::git(root, &["branch", "-d", b]);
                 }
                 println!("removed {b}");

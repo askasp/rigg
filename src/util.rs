@@ -108,6 +108,47 @@ pub fn git_worktree_add(
     Ok(())
 }
 
+/// Create a worktree on a branch that already exists, so an existing branch
+/// can be worked on without a new one being cut from it.
+///
+/// A branch only on a remote is materialised as a local one tracking it -
+/// which is what `git checkout <branch>` does by hand, and what makes
+/// adopting someone else's pushed branch a single command.
+pub fn git_worktree_checkout(
+    main: &std::path::Path,
+    branch: &str,
+    remote_ref: Option<&str>,
+    dest: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let dest = dest.to_string_lossy().to_string();
+    match remote_ref {
+        Some(r) => git(main, &["worktree", "add", "--track", "-b", branch, &dest, r])?,
+        None => git(main, &["worktree", "add", &dest, branch])?,
+    };
+    Ok(())
+}
+
+/// The remote-tracking ref for a branch that has no local ref yet, if exactly
+/// one remote has it. Two remotes carrying the same name is a question rather
+/// than something to guess at, so that returns nothing.
+pub fn remote_branch(root: &std::path::Path, branch: &str) -> Option<String> {
+    let remotes = git(root, &["remote"]).ok()?;
+    let mut hits: Vec<String> = remotes
+        .lines()
+        .map(|r| format!("{}/{branch}", r.trim()))
+        .filter(|r| {
+            git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{r}")]).is_ok()
+        })
+        .collect();
+    match hits.len() {
+        1 => hits.pop(),
+        _ => None,
+    }
+}
+
 /// The repository's primary checkout. Worktrees are created from there, so
 /// every checkout hangs off one place rather than chaining off each other.
 pub fn main_checkout(root: &std::path::Path) -> Result<PathBuf> {

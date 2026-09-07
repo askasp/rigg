@@ -26,7 +26,22 @@ review found, and hands back a URL to look at. Everything below is optional.
 | | |
 | --- | --- |
 | `new <task>` | the above |
+| `adopt <branch>` | all of that on a branch that exists already |
 | `add <stack> <task>` | stack another branch on top of one |
+
+`adopt` is for a branch nobody here started - a colleague's PR, something cut
+by hand. It gets the same treatment as anything else: a preview to look at, a
+review, and then `say` and `add` to carry it on.
+
+```
+@rigg adopt feature/login
+@rigg preview adopt feature/login        # only put it on a URL
+@rigg adopt feature/login also fix the spacing
+```
+
+The stack is named `<channel>/<branch>`, so it belongs to this channel like any
+other and the branch name is still what you type to reach it. `rm` never
+removes the branch itself - rigg did not make it.
 
 **While it is running**
 

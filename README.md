@@ -38,6 +38,7 @@ addressed **by stack name**, so it works from any directory:
 rigg new billing "Add proration to subscription changes"
 rigg new "Add proration to subscription changes"   # name generated for you
 rigg quick new billing "..."      # use the pipeline named `quick`
+rigg adopt feature/login          # a branch that exists already
 rigg add billing "Expose it in the API"   # next branch, auto-named billing-2
 rigg say billing "also handle refunds"    # another turn in that stack's session
 rigg attach billing               # open claude/opencode on that stack's session
@@ -168,6 +169,40 @@ the trunk, unless `--force`; like `prune` it is a dry run until `--yes`.
 Where a stack name is omitted, `add`, `attach`, `logs` and `say` choose one: silently
 when there is only one, through fzf when it is installed, otherwise from a
 numbered list. `attach` prefers the stack you are standing in.
+
+### Taking over a branch that exists
+
+Not every branch starts here. A colleague's PR, something you cut by hand this
+morning - `adopt` puts a pipeline on it as it stands:
+
+```sh
+rigg adopt feature/login                     # the default pipeline
+rigg preview adopt feature/login             # only bring a preview up
+rigg adopt origin/feature/login              # not fetched into a local branch yet
+rigg adopt feature/login "fix the spacing"   # ... and give it something to do
+```
+
+Nothing is created. The branch is checked out into its own worktree and
+recorded as a stack, so every other verb reaches it from there: `rigg logs`,
+`rigg say`, `rigg stack pr`, and `rigg add` for the next branch on top.
+
+`--base` is what the branch is stacked on - what a review diffs against and
+what a PR would target. It defaults to the trunk, which is what a branch cut
+from the trunk wants. `--stack <name>` names the stack something other than the
+branch.
+
+`new` always needs a task, because a branch with nothing to do is not worth
+cutting. Here the branch exists already, so a pipeline that only reviews or
+previews it is asked for none - the task is prompted for only when a step
+actually uses `{{task}}`.
+
+Because rigg did not make the branch, it does not delete it: `stack rm` gives
+the checkout back and leaves the branch alone, so only uncommitted work or a
+run in flight can block the removal.
+
+git gives a branch one worktree at a time, so an existing checkout is used
+rather than reported as a collision - unless it is the main one, which rigg
+will not take over. Switch that to something else first.
 
 ### Reading a log
 

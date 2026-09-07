@@ -38,6 +38,7 @@ RIGG = os.environ.get("RIGG_BIN", str(HERE.parent / "target" / "release" / "rigg
 HELP_GROUPS = [
     ("Start work", [
         ("new <task>", "do it, review it, fix what the review found, and put it on a URL"),
+        ("adopt <branch>", "the same on a branch that already exists — preview it, review it"),
         ("add <stack> <task>", "stack another branch on top of one"),
     ]),
     ("While it is running", [
@@ -121,7 +122,7 @@ def help_for(channel: "Channel") -> str:
 
 
 # Commands that put an agent to work, as opposed to looking at what it did.
-MUTATING = {"new", "add", "say"}
+MUTATING = {"new", "adopt", "add", "say"}
 
 
 class Channel:
@@ -243,7 +244,7 @@ def ts_of(posted: object) -> str | None:
 
 
 def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str,
-                    primary: bool = True) -> None:
+                    primary: bool = True, stack: str | None = None) -> None:
     """Record a thread that belongs to a branch.
 
     `primary` is where a run reports: the notify hook reads `thread_ts`, which
@@ -264,6 +265,12 @@ def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str,
     # flattens its slash and cannot be turned back.
     data["branch"] = branch
     data["channel"] = channel
+    # Usually the branch is inside the stack's own name and saying it twice
+    # would be noise. An adopted branch is not - it was named by whoever made
+    # it - so the stack has to be recorded for a reply in the thread to reach
+    # it by the name this channel knows.
+    if stack and stack != branch:
+        data["stack"] = stack
     if primary or not data.get("thread_ts"):
         data["thread_ts"] = thread_ts
     threads = [t for t in data.get("threads", []) if t != thread_ts]
@@ -293,7 +300,7 @@ def stack_for_thread(repo: Path, channel: str, thread_ts: str | None) -> str | N
         if data.get("thread_ts"):
             known.add(data["thread_ts"])
         if thread_ts in known:
-            return data.get("branch") or f.stem
+            return data.get("stack") or data.get("branch") or f.stem
     return None
 
 
@@ -522,6 +529,68 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
     ts = ts_of(posted)
     if ts:
         remember_thread(repo, stack, channel, ts)
+
+
+def local_branch(repo: Path, name: str) -> str:
+    """The branch a name means.
+
+    `origin/feature/login` is how a branch is written when it has just been
+    read off a PR page or a `git branch -a`. rigg takes the remote off itself,
+    so without this the stack would be named after a name that is not the
+    branch - and the thread would be recorded under one no run reports as.
+    """
+    def has(ref: str) -> bool:
+        return subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref],
+            cwd=repo, capture_output=True,
+        ).returncode == 0
+
+    if "/" not in name or has(f"refs/heads/{name}"):
+        return name
+    remote, _, rest = name.partition("/")
+    remotes = subprocess.run(
+        ["git", "remote"], cwd=repo, capture_output=True, text=True,
+    ).stdout.split()
+    if rest and remote in remotes and has(f"refs/remotes/{name}"):
+        return rest
+    return name
+
+
+def cmd_adopt(repo: Path, prefix: str, rest: str, say, channel: str,
+              pipeline: str | None = None, images: list[str] | None = None) -> None:
+    """Put a pipeline on a branch that exists already.
+
+    `new` cuts a branch and gives an agent something to do on it. Here the
+    branch is there before rigg is - a colleague's PR, something started by
+    hand - and what is wanted is the rest of the treatment: a preview to look
+    at, a review, and then `say` and `add` to carry it on.
+
+    The stack is named `<channel>/<branch>`, so it belongs to this channel like
+    any other and the branch is still what you type to reach it.
+    """
+    parts = rest.split(None, 1)
+    if not parts:
+        say("`adopt <branch>` — which branch? Add a task after it if there is one.")
+        return
+    branch, task = local_branch(repo, parts[0]), (parts[1] if len(parts) > 1 else "")
+    task, mods = split_modifiers(task)
+    stack = f"{prefix}/{branch}"
+    args = ["adopt", branch]
+    # An empty positional is a task of "", which is not the same as no task:
+    # a pipeline that only previews the branch must not be asked for one.
+    if task:
+        args.append(task)
+    args += ["--stack", stack] + image_args(images or []) + mods
+    if pipeline:
+        args += ["--pipeline", pipeline]
+    code, out = run_rigg(repo, args)
+    if code != 0:
+        say(f"could not adopt `{branch}`:\n```\n{out[:2500]}\n```")
+        return
+    posted = say(f"took over the existing branch `{branch}`\n```\n{out[:1500]}\n```")
+    ts = ts_of(posted)
+    if ts:
+        remember_thread(repo, branch, channel, ts, stack=stack)
 
 
 def find_stack(repo: Path, prefix: str, short: str) -> tuple[str | None, str | None]:
@@ -1182,6 +1251,7 @@ CHANNEL_LEVEL = {"stacks", "status", "list"}
 
 COMMANDS = {
     "new": cmd_new,
+    "adopt": cmd_adopt,
     "add": cmd_add,
     "say": cmd_say,
     "stacks": cmd_stacks,
@@ -1397,6 +1467,11 @@ def main() -> int:
                 say(help_for(channel))
                 return
             fn = cmd_new
+            # A pipeline word in front of a verb, the shape the CLI takes:
+            # `preview adopt <branch>` puts that pipeline on that branch.
+            head, _, tail = rest.partition(" ")
+            if head.lower() == "adopt":
+                fn, rest, verb = cmd_adopt, tail.strip(), "adopt"
         refusal = channel.may(verb)
         if refusal:
             say(refusal)
@@ -1448,7 +1523,7 @@ def main() -> int:
                     # starts one - is the conversation's identity.
                     fn(channel.repo, name, rest, reply, event["channel"],
                        event.get("thread_ts") or event["ts"])
-                elif fn in (cmd_new, cmd_add, cmd_say):
+                elif fn in (cmd_new, cmd_adopt, cmd_add, cmd_say):
                     fn(channel.repo, name, rest, reply, event["channel"],
                        pipeline, images)
                 else:

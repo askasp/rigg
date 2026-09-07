@@ -24,6 +24,11 @@ pub struct Entry {
     pub path: Option<String>,
     #[serde(default)]
     pub pr: Option<u64>,
+    /// An existing branch taken over rather than cut by rigg. Removing the
+    /// stack gives the checkout back but leaves the branch alone: it was
+    /// someone else's before rigg touched it and still is.
+    #[serde(default)]
+    pub adopted: bool,
 }
 
 /// State lives in the shared git dir so every worktree sees the same file.

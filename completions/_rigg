@@ -9,10 +9,17 @@ _rigg_stacks() {
   _describe 'stack' names
 }
 
+_rigg_branches() {
+  local -a names
+  names=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null)"})
+  _describe 'branch' names
+}
+
 _rigg() {
   local -a cmds
   cmds=(
     'new:Start a new stack and run a pipeline on it'
+    'adopt:Take an existing branch into a stack and run a pipeline on it'
     'add:Append the next branch to a stack'
     'say:Send a follow-up prompt to a stack'
     'attach:Open an agent on a stack'
@@ -38,6 +45,7 @@ _rigg() {
   fi
   case "${words[2]}" in
     add|say|attach|logs|stop|continue) (( CURRENT == 3 )) && _rigg_stacks ;;
+    adopt) (( CURRENT == 3 )) && _rigg_branches ;;
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
   esac
 }
