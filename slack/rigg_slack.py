@@ -551,7 +551,13 @@ def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     if len(parts) > 1:
         args += ["--from", parts[1]]
     code, out = run_rigg(Path(dir_out.strip()), args)
-    say(f"```\n{out[:1500]}\n```" if out else ("restarted" if code == 0 else "failed"))
+    posted = say(f"```\n{out[:1500]}\n```" if out else
+                 ("restarted" if code == 0 else "failed"))
+    # So the run reports back here, which it cannot do for a branch that was
+    # started from a terminal and has no thread recorded.
+    ts = posted.get("ts") if isinstance(posted, dict) else None
+    if ts and code == 0:
+        remember_thread(repo, stack, channel, ts)
 
 
 def pipeline_of(repo: Path, stack: str) -> str | None:
@@ -560,7 +566,11 @@ def pipeline_of(repo: Path, stack: str) -> str | None:
     if code != 0:
         return None
     m = re.search(r"^rigg\s+\S+\s+\(base \S+, pipeline (\S+),", out, re.M)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    # It may since have been renamed or removed, in which case the default is
+    # a better answer than a run that refuses to start.
+    return m.group(1) if m.group(1) in pipelines(repo) else None
 
 
 def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:  # noqa: C901

@@ -589,7 +589,11 @@ fn real_main() -> Result<()> {
             let recorded = last_attempted(&root, &entry.branch);
             let pipeline = pipeline
                 .or_else(|| recorded.as_ref().and_then(|(p, _)| p.clone()))
-                .or_else(|| logged_pipeline(&root, &entry.branch));
+                .or_else(|| logged_pipeline(&root, &entry.branch))
+                // A pipeline the branch once ran may have been renamed or
+                // removed since. Carrying on with the default beats refusing
+                // to continue a branch because the config moved on.
+                .filter(|p| cfg.pipelines.contains_key(p));
             let steps = pipeline_steps(
                 &cfg, pipeline.as_deref(), &with_features, &without_features,
             )?;
