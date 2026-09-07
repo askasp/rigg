@@ -47,6 +47,7 @@ HELP_GROUPS = [
     ]),
     ("Have a look", [
         ("stacks", "one message per stack — reply in one to talk to it"),
+        ("summary <stack>", "ask it what it did, what was wrong, and what is left"),
         ("logs <stack>", "the tail of a run's log"),
         ("urls <stack>", "links the run printed — previews, PRs"),
         ("parts", "the optional parts you can add"),
@@ -667,6 +668,80 @@ def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None
     say(f"pipelines here:\n{lines}\n\n`new <task>` runs the default one.")
 
 
+SUMMARY_PROMPT = """Summarise this branch for someone who has not been following.
+
+Cover, briefly: what you were asked to do, what you have actually changed so
+far, anything you found to be wrong and why it was wrong, and what is left.
+If there was a bug, say what the root cause turned out to be rather than only
+what you changed.
+
+A short paragraph or a few bullets. Do not change any files, and do not run
+anything - this is a question, not a task."""
+
+
+def agent_text(out: str) -> str:
+    """The agent's own words, out of a run's output.
+
+    Everything else on the way past belongs to rigg or to the tool stream: the
+    step rule, the argv echo, the per-tool `·` lines, the timing.
+    """
+    keep = []
+    for line in out.splitlines():
+        t = line.rstrip()
+        if not t.strip():
+            keep.append("")
+            continue
+        if t.startswith("----") or t.lstrip().startswith(("· ", "-> [", "$ ")):
+            continue
+        if re.match(r"^\s*(ok|failed)\s*\(", t) or t.startswith(("total ", "rigg", "  -> ")):
+            continue
+        keep.append(t)
+    return "\n".join(keep).strip()
+
+
+def chunks(text: str, size: int) -> list[str]:
+    """Split for Slack, on paragraph then line breaks rather than mid-word."""
+    out, cur = [], ""
+    for para in text.split("\n\n"):
+        for piece in ([para] if len(para) <= size else para.splitlines()):
+            if len(cur) + len(piece) + 2 > size and cur:
+                out.append(cur.rstrip())
+                cur = ""
+            cur += piece + "\n\n"
+    if cur.strip():
+        out.append(cur.rstrip())
+    return out or [text[:size]]
+
+
+def cmd_summary(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """Ask the agent what it has done and what is left.
+
+    A turn rather than a log: the session already holds the task, the review
+    and every change, so this needs no re-reading - which is what makes it
+    cheap enough to ask casually.
+    """
+    if not rest:
+        say("`summary <stack>`")
+        return
+    stack = resolve(repo, prefix, rest.split()[0], say)
+    if stack is None:
+        return
+    say(f"asking `{stack}`...")
+    # No --push: this changes nothing, and a summary is not a commit.
+    code, out = run_rigg(repo, ["say", stack, SUMMARY_PROMPT], timeout=1800)
+    if code != 0:
+        say(f"could not ask it:\n```\n{out[-1500:]}\n```")
+        return
+    text = agent_text(out)
+    if not text:
+        say(f"```\n{out[-1500:]}\n```")
+        return
+    # A real summary runs past Slack's per-message limit, and truncating it
+    # loses the end - which is where "what is left" lives.
+    for part in chunks(text, 3500):
+        say(part)
+
+
 def cmd_stop(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     if not rest:
         say("`stop <stack>` — which one?")
@@ -916,7 +991,7 @@ def cmd_logs(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
 # Commands whose first word is a stack, and which therefore can take it from
 # the thread instead.
 STACK_FIRST = {"add", "say", "stop", "cancel", "retry", "continue", "urls",
-               "logs", "rm", "remove"}
+               "logs", "rm", "remove", "summary"}
 
 # Answered in the channel rather than in a thread. A listing exists to be
 # glanced at, and a message per stack is no use if all of them are folded
@@ -940,6 +1015,7 @@ COMMANDS = {
     "cancel": cmd_stop,
     "retry": cmd_retry,
     "continue": cmd_continue,
+    "summary": cmd_summary,
     "urls": cmd_urls,
     "rm": cmd_rm,
     "remove": cmd_rm,

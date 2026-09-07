@@ -42,6 +42,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 | | |
 | --- | --- |
 | `stacks` | live stacks and where each has got to; clears merged ones (`list`, `status`) |
+| `summary <stack>` | ask the agent what it did, what was wrong, and what is left |
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
 | `parts` | the optional parts this repo has |
@@ -84,6 +85,11 @@ Put any of these on the end of a task, in any order:
 They are only taken off the end, and `+x` / `-x` only when they look like a
 part — so "make the button 2+2 wide" and "set FOO=bar in the config" stay
 tasks.
+
+`summary` is a turn, not a log: the session already holds the task, the review
+and every change, so the agent answers from what it knows rather than reading
+anything back. That is what makes it quick — around half a minute — and why it
+can say what a bug's root cause turned out to be, which no log contains.
 
 ### Naming a stack
 
