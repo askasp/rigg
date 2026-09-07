@@ -61,6 +61,36 @@ channel limited to `stacks` and `logs` cannot start one.
 `rm` mirrors the CLI in being a dry run until you add `yes`, which matters
 because it also stops whatever the branch had running — a dev stack, a tunnel.
 
+## Channels, and who is allowed
+
+A channel does nothing until it is listed in `channels.toml`. That mapping is
+what says which repo it drives, and an unmapped channel being inert is the
+access control — but it costs no restart: the file is re-read when it changes,
+so adding a channel is an edit plus `/invite @rigg`. A broken edit is reported
+and the last good config keeps serving.
+
+*Who* may use a mapped channel is Slack's business: whoever is in it. A second
+list of user IDs here would only duplicate what Slack already keeps, and then
+drift from it. Which means a channel you map is a channel whose members you are
+handing an agent to — a message becomes a prompt for an agent running with
+`bypassPermissions`, so **keep it private**. `--check` says which mapped
+channels are public, and the bridge repeats it the first time it sees a message
+in one.
+
+`commands` narrows what a channel may do, which is how a wider channel can
+watch without being able to start work:
+
+```toml
+# Private, just you: everything.
+[channels.rigg-tasks]
+repo = "~/git/amino-monorepo"
+
+# The team can look, not launch. They see this channel's stacks, not yours.
+[channels.bugs_feil]
+repo = "~/git/amino-monorepo"
+commands = ["stacks", "logs", "urls", "help"]
+```
+
 ## Setting up the Slack app
 
 1. **Create the app** at <https://api.slack.com/apps> → *Create New App* →
