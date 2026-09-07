@@ -436,8 +436,75 @@ def parse(text: str) -> tuple[str, str]:
 # wiring
 
 
+def check(cfg: Config, bot_token: str, app_token: str) -> int:
+    """Verify the setup and say precisely what is wrong with it.
+
+    Each failure here is one someone hits once while wiring Slack up, and each
+    has a different fix - worth telling apart rather than letting the bridge
+    fall over on the first message instead.
+    """
+    from slack_sdk import WebClient
+    from slack_sdk.errors import SlackApiError
+
+    problems = 0
+    web = WebClient(token=bot_token)
+    try:
+        me = web.auth_test()
+        print(f"bot token      ok - {me['user']} in {me['team']}")
+    except SlackApiError as e:
+        print(f"bot token      REJECTED ({e.response['error']}) - it should "
+              f"start with xoxb- and come from Install App")
+        return 1
+
+    try:
+        WebClient(token=app_token).api_call("apps.connections.open")
+        print("app token      ok")
+    except SlackApiError as e:
+        print(f"app token      REJECTED ({e.response['error']}) - it should "
+              f"start with xapp- and carry connections:write")
+        problems += 1
+
+    found: dict[str, dict] = {}
+    try:
+        cursor = None
+        while True:
+            page = web.conversations_list(
+                types="public_channel,private_channel", limit=200, cursor=cursor
+            )
+            for c in page["channels"]:
+                if c["name"] in cfg.channels:
+                    found[c["name"]] = c
+            cursor = page.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+    except SlackApiError as e:
+        print(f"channels       could not list ({e.response['error']})")
+        problems += 1
+
+    for name, ch in cfg.channels.items():
+        info = found.get(name)
+        if info is None:
+            print(f"#{name:<14} NOT FOUND - no such channel, or the bot cannot "
+                  f"see it. Check the name, then `/invite @rigg`.")
+            problems += 1
+        elif not info.get("is_member"):
+            print(f"#{name:<14} found, but the bot is not in it - `/invite @rigg`")
+            problems += 1
+        else:
+            kind = "private" if info.get("is_private") else "PUBLIC"
+            note = ""
+            if not info.get("is_private") and ch.mutating():
+                note = "  (anyone who joins can run agents)"
+            print(f"#{name:<14} ok - {kind}, {ch.repo}{note}")
+
+    print("\nall good" if problems == 0 else f"\n{problems} problem(s) to fix")
+    return 1 if problems else 0
+
+
 def main() -> int:
-    cfg_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "channels.toml"
+    args = [a for a in sys.argv[1:] if a != "--check"]
+    checking = "--check" in sys.argv
+    cfg_path = Path(args[0]) if args else HERE / "channels.toml"
     if not cfg_path.exists():
         raise SystemExit(f"no config at {cfg_path} (copy channels.example.toml)")
     cfg = Config(cfg_path)
@@ -449,6 +516,9 @@ def main() -> int:
     app_token = os.environ.get("SLACK_APP_TOKEN")
     if not bot_token or not app_token:
         raise SystemExit("set SLACK_BOT_TOKEN (xoxb-) and SLACK_APP_TOKEN (xapp-)")
+
+    if checking:
+        return check(cfg, bot_token, app_token)
 
     # Bolt verifies the bot token here. Left alone it fails with a stack trace
     # out of slack_sdk, which is a poor way to learn you pasted the wrong one.

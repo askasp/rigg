@@ -2,3 +2,4 @@
 .rigg/
 __pycache__/
 slack/channels.toml
+slack/.env

@@ -75,37 +75,37 @@ because it also stops whatever the branch had running — a dev stack, a tunnel.
 
 ## Running it
 
+Put the two tokens in `slack/.env` (gitignored, so they stay out of shell
+history):
+
 ```sh
-cp slack/channels.example.toml slack/channels.toml   # then edit
-export SLACK_BOT_TOKEN=xoxb-...
-export SLACK_APP_TOKEN=xapp-...
-uv run --with slack-bolt slack/rigg_slack.py
+cp slack/env.example slack/.env    # then paste the tokens in
 ```
 
-## Who is allowed
+Check the wiring before starting anything — it tells the failures apart rather
+than letting the first message fall over:
 
-Whoever is in the channel. Slack already decides that, and a second list of
-user IDs here would only duplicate it and then drift from it — so the channel
-*is* the boundary, and an unmapped channel does nothing at all.
-
-Which means a channel you map is a channel whose members you are handing an
-agent to. A message becomes a prompt for an agent running with
-`bypassPermissions`, so put it in a **private** channel. If you map a public
-one the bridge says so the first time it sees a message there.
-
-`commands` narrows what a channel may do, which is how a wider channel can
-watch without being able to start work:
-
-```toml
-# Private, just you: everything.
-[channels.aksel-dev]
-repo = "~/git/amino-monorepo"
-
-# The team can look, not launch. They see this channel's stacks, not yours.
-[channels.support]
-repo = "~/git/amino-monorepo"
-commands = ["stacks", "logs", "help"]
+```sh
+./slack/run.sh --check
 ```
+
+```
+bot token      ok - rigg in Amino
+app token      ok
+#aksel-dev     ok - private, /home/aksel/git/amino-monorepo
+#support       found, but the bot is not in it - `/invite @rigg`
+
+1 problem(s) to fix
+```
+
+Then start it:
+
+```sh
+./slack/run.sh
+```
+
+It prints the channel→repo map and stays in the foreground. Socket Mode dials
+out to Slack, so there is no port to open and nothing to expose.
 
 ## Reporting back
 
