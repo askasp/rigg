@@ -241,15 +241,51 @@ pub fn shell_quiet(dir: &std::path::Path, cmd: &str, env: &[(&str, String)]) -> 
 }
 
 /// Run a shell command, streaming output to the terminal.
+///
+/// stderr is teed rather than inherited so that a failure can say *why*. A
+/// multi-line script otherwise reported itself in full and the one line that
+/// explained it - "nothing to push: no commits beyond main" - was left in the
+/// log for someone to go and find.
 pub fn shell(dir: &std::path::Path, cmd: &str) -> Result<()> {
-    let status = Command::new("sh")
+    use std::io::{BufRead, Write};
+
+    let mut child = Command::new("sh")
         .current_dir(dir)
         .arg("-c")
         .arg(cmd)
-        .status()
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to spawn shell for `{cmd}`"))?;
+
+    let mut tail: Vec<String> = Vec::new();
+    if let Some(err) = child.stderr.take() {
+        for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+            let _ = writeln!(std::io::stderr(), "{line}");
+            if !line.trim().is_empty() {
+                tail.push(line);
+                if tail.len() > 3 {
+                    tail.remove(0);
+                }
+            }
+        }
+    }
+
+    let status = child.wait()?;
     if !status.success() {
-        bail!("command failed (exit {}): {cmd}", status.code().unwrap_or(-1));
+        // The first line that does something: `set -eu` and the comment above
+        // it name the failure no better than the exit code does.
+        let what = cmd
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("set "))
+            .unwrap_or(cmd.trim());
+        let what: String = what.chars().take(60).collect();
+        let why = if tail.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", tail.join("; "))
+        };
+        bail!("`{what}` failed (exit {}){why}", status.code().unwrap_or(-1));
     }
     Ok(())
 }
