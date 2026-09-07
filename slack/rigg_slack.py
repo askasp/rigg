@@ -526,10 +526,25 @@ def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         say(f"no checkout for `{stack}`:\n```\n{dir_out[:800]}\n```")
         return
     args = ["run", "--detach"]
+    # Carry the original pipeline forward. Without this a retry silently runs
+    # the default one, whose steps may not even include the one being resumed
+    # from - and the branch would come back having done something else.
+    pipeline = pipeline_of(repo, stack)
+    if pipeline:
+        args += ["--pipeline", pipeline]
     if len(parts) > 1:
         args += ["--from", parts[1]]
     code, out = run_rigg(Path(dir_out.strip()), args)
     say(f"```\n{out[:1500]}\n```" if out else ("restarted" if code == 0 else "failed"))
+
+
+def pipeline_of(repo: Path, stack: str) -> str | None:
+    """Which pipeline a branch was last run with, from its log header."""
+    code, out = run_rigg(repo, ["logs", stack])
+    if code != 0:
+        return None
+    m = re.search(r"^rigg\s+\S+\s+\(base \S+, pipeline (\S+),", out, re.M)
+    return m.group(1) if m else None
 
 
 def cmd_urls(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
