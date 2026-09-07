@@ -305,9 +305,8 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         say("`add <stack> <task>`")
         return
     short, task = parts[0], parts[1]
-    stack = short if short.startswith(f"{prefix}/") else f"{prefix}/{short}"
-    if stack not in own_stacks(repo, prefix):
-        say(f"no stack `{stack}` in this channel. `stacks` lists them.")
+    stack = resolve(repo, prefix, short, say)
+    if stack is None:
         return
     code, out = run_rigg(repo, ["add", stack, task])
     if code != 0:
@@ -326,9 +325,8 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         say("`say <stack> <message>`")
         return
     short, message = parts[0], parts[1]
-    stack = short if short.startswith(f"{prefix}/") else f"{prefix}/{short}"
-    if stack not in own_stacks(repo, prefix):
-        say(f"no stack `{stack}` in this channel. `stacks` lists them.")
+    stack = resolve(repo, prefix, short, say)
+    if stack is None:
         return
     say(f"passing that to `{stack}`...")
     # A turn takes as long as it takes; the ack above is what keeps Slack happy.
