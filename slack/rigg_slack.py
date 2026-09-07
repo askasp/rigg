@@ -374,14 +374,18 @@ def download_images(event: dict, token: str) -> tuple[list[str], str | None]:
 AGENT_KINDS = {"claude", "opencode", "codex", "gemini"}
 
 
-def split_agent(text: str) -> tuple[str, str | None]:
+def split_agent(text: str, keep: int = 1) -> tuple[str, str | None]:
     """Peel a trailing `with opencode` / `on opencode` off a task.
 
     A word reads better than a flag for the same reason `preview` does, and
     putting it last keeps the task the thing you type first.
+
+    `keep` is how many words have to survive: a task needs at least one, or
+    "on opencode" would eat the whole of it. `continue +copilot` carries no
+    task at all, and passes 0.
     """
     words = text.split()
-    if len(words) >= 3 and words[-2].lower() in ("with", "on", "using") \
+    if len(words) >= keep + 2 and words[-2].lower() in ("with", "on", "using") \
             and words[-1].lower() in AGENT_KINDS:
         return " ".join(words[:-2]), words[-1].lower()
     return text, None
@@ -391,7 +395,7 @@ def agent_args(kind: str | None) -> list[str]:
     return ["--agent", kind] if kind else []
 
 
-def split_vars(text: str) -> tuple[str, list[str]]:
+def split_vars(text: str, keep: int = 1) -> tuple[str, list[str]]:
     """Peel trailing `name=value` settings off a task.
 
     Only from the end, and only while they keep matching, so an `=` inside the
@@ -399,7 +403,7 @@ def split_vars(text: str) -> tuple[str, list[str]]:
     """
     words = text.split()
     found: list[str] = []
-    while len(words) > 1 and re.fullmatch(r"[a-zA-Z_][\w-]*=\S+", words[-1]):
+    while len(words) > keep and re.fullmatch(r"[a-zA-Z_][\w-]*=\S+", words[-1]):
         found.insert(0, words.pop())
     return " ".join(words), found
 
@@ -418,7 +422,7 @@ def var_args(vars: list[str]) -> list[str]:
     return out
 
 
-def split_features(text: str) -> tuple[str, list[str]]:
+def split_features(text: str, keep: int = 1) -> tuple[str, list[str]]:
     """Peel trailing `+preview` / `-copilot` off a task.
 
     `+x` rather than `with x`, because `with` already means the agent and a
@@ -426,26 +430,31 @@ def split_features(text: str) -> tuple[str, list[str]]:
     """
     words = text.split()
     args: list[str] = []
-    while len(words) > 1 and re.fullmatch(r"[+-][a-zA-Z][\w-]*", words[-1]):
+    while len(words) > keep and re.fullmatch(r"[+-][a-zA-Z][\w-]*", words[-1]):
         w = words.pop()
         args = ["--with" if w[0] == "+" else "--without", w[1:]] + args
     return " ".join(words), args
 
 
-def split_modifiers(text: str) -> tuple[str, list[str]]:
+def split_modifiers(text: str, keep: int = 1) -> tuple[str, list[str]]:
     """Strip `+preview`, `effort=high` and `with opencode` off the end.
 
     In any order, and repeatedly, so nobody has to remember one.
+
+    `keep` is how much has to be left behind. One word by default, because
+    these come off the end of a task and a task cannot be nothing. Where there
+    is no task to protect - `continue +copilot`, `adopt <branch> +preview` -
+    pass 0, or the last modifier stays put and is read as a task.
     """
     args: list[str] = []
     changed = True
     while changed:
         before = text
-        text, kind = split_agent(text)
+        text, kind = split_agent(text, keep)
         args += agent_args(kind)
-        text, found = split_vars(text)
+        text, found = split_vars(text, keep)
         args += var_args(found)
-        text, feats = split_features(text)
+        text, feats = split_features(text, keep)
         args += feats
         changed = text != before
     return text, args
@@ -581,7 +590,7 @@ def cmd_adopt(repo: Path, prefix: str, rest: str, say, channel: str,
         say("`adopt <branch>` — which branch? Add a task after it if there is one.")
         return
     branch, task = local_branch(repo, parts[0]), (parts[1] if len(parts) > 1 else "")
-    task, mods = split_modifiers(task)
+    task, mods = split_modifiers(task, keep=0)
     stack = f"{prefix}/{branch}"
     args = ["adopt", branch]
     # An empty positional is a task of "", which is not the same as no task:
@@ -1051,7 +1060,7 @@ def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     # `continue foo +copilot` is the usual shape now that parts replaced
     # pipeline names; a bare name still works where a repo has them.
     rest_after = " ".join(parts[1:])
-    _, mods = split_modifiers(rest_after)
+    _, mods = split_modifiers(rest_after, keep=0)
     if mods:
         args += mods
     elif len(parts) > 1:
@@ -1506,6 +1515,12 @@ def main() -> int:
         if verb in STACK_FIRST:
             first = rest.split(None, 1)[0] if rest else ""
             found, _ = find_stack(channel.repo, name, first)
+            if found:
+                # Naming it here says which stack this thread is about, so the
+                # next message in the thread does not have to name it again.
+                # Not primary: this must not move where the run reports.
+                remember_thread(channel.repo, found, event["channel"],
+                                event.get("thread_ts") or event["ts"], primary=False)
             if not found:
                 in_thread = stack_for_thread(
                     channel.repo, event["channel"], event.get("thread_ts")
