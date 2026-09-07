@@ -42,20 +42,49 @@ Stacks are named `<channel>/<slug>`; refer to them by the short name."""
 # config
 
 
+# Commands that put an agent to work, as opposed to looking at what it did.
+MUTATING = {"new", "add", "say"}
+
+
+class Channel:
+    """One channel's repo, and which commands it may run.
+
+    *Who* may run them is Slack's business: membership of the channel is the
+    access control. That is the whole reason an unmapped channel does nothing,
+    and the reason a private channel is the natural place to put this - the
+    bridge would only be duplicating, and then drifting from, a list Slack
+    already keeps.
+    """
+
+    def __init__(self, name: str, raw: dict):
+        self.name = name
+        self.repo = Path(raw["repo"]).expanduser()
+        # Absent means every command; a list narrows it, e.g. ["stacks", "logs"]
+        # for a channel that should be able to look but not launch.
+        allowed = raw.get("commands")
+        self.commands: set[str] | None = set(allowed) if allowed is not None else None
+
+    def may(self, verb: str) -> str | None:
+        """Why this is refused, or None if it is allowed."""
+        if self.commands is not None and verb not in self.commands:
+            allowed = ", ".join(f"`{c}`" for c in sorted(self.commands))
+            return f"`{verb}` is not allowed in #{self.name} — only {allowed}"
+        return None
+
+    def mutating(self) -> bool:
+        return self.commands is None or bool(self.commands & MUTATING)
+
+
 class Config:
     def __init__(self, path: Path):
         with path.open("rb") as fh:
             raw = tomllib.load(fh)
-        self.channels: dict[str, Path] = {
-            name: Path(c["repo"]).expanduser()
-            for name, c in raw.get("channels", {}).items()
+        self.channels: dict[str, Channel] = {
+            name: Channel(name, c) for name, c in raw.get("channels", {}).items()
         }
-        # Empty means anyone in a mapped channel may drive an agent, which is
-        # code execution on this machine. Startup says so out loud.
-        self.allowed_users: set[str] = set(raw.get("allowed_users", []))
-        for name, repo in self.channels.items():
-            if not (repo / ".git").exists():
-                raise SystemExit(f"channel #{name}: {repo} is not a git repository")
+        for name, ch in self.channels.items():
+            if not (ch.repo / ".git").exists():
+                raise SystemExit(f"channel #{name}: {ch.repo} is not a git repository")
 
 
 # --------------------------------------------------------------------------
@@ -264,26 +293,40 @@ def main() -> int:
 
     pool = ThreadPoolExecutor(max_workers=4)
     names: dict[str, str] = {}
+    warned: set[str] = set()
 
     def channel_name(client, channel_id: str) -> str | None:
         if channel_id not in names:
             try:
-                info = client.conversations_info(channel=channel_id)
-                names[channel_id] = info["channel"]["name"]
+                info = client.conversations_info(channel=channel_id)["channel"]
             except Exception:
                 return None
+            names[channel_id] = info["name"]
+            # Membership is the access control now, so a public channel means
+            # anyone in the workspace who joins it can put an agent to work.
+            # Worth saying once, where it will be seen.
+            ch = cfg.channels.get(info["name"])
+            if (
+                ch is not None
+                and ch.mutating()
+                and not info.get("is_private")
+                and info["name"] not in warned
+            ):
+                warned.add(info["name"])
+                print(
+                    f"WARNING: #{info['name']} is a public channel and can run "
+                    f"agents. Anyone who joins it gets that. Make it private, "
+                    f"or narrow it with `commands`."
+                )
         return names[channel_id]
 
     def handle(event, client, say):
         user = event.get("user")
         if not user or event.get("bot_id"):
             return
-        if cfg.allowed_users and user not in cfg.allowed_users:
-            say("you are not on this bridge's allowlist")
-            return
         name = channel_name(client, event["channel"])
-        repo = cfg.channels.get(name) if name else None
-        if repo is None:
+        channel = cfg.channels.get(name) if name else None
+        if channel is None:
             say(f"#{name} is not mapped to a repo in {cfg_path.name}")
             return
 
@@ -292,13 +335,17 @@ def main() -> int:
         if fn is None:
             say(HELP)
             return
+        refusal = channel.may(verb)
+        if refusal:
+            say(refusal)
+            return
 
         def reply(text: str):
             # Threading every reply under the request keeps a channel with
             # several stacks in flight readable.
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
 
-        pool.submit(fn, repo, name, rest, reply, event["channel"])
+        pool.submit(fn, channel.repo, name, rest, reply, event["channel"])
 
     app.event("app_mention")(lambda event, client, say: handle(event, client, say))
 
@@ -309,11 +356,10 @@ def main() -> int:
             handle(event, client, say)
 
     print(f"rigg slack bridge — {len(cfg.channels)} channel(s):")
-    for n, r in cfg.channels.items():
-        print(f"  #{n:<20} {r}")
-    if not cfg.allowed_users:
-        print("WARNING: allowed_users is empty — anyone in these channels can "
-              "run an agent on this machine.")
+    for n, c in cfg.channels.items():
+        what = ",".join(sorted(c.commands)) if c.commands is not None else "all commands"
+        print(f"  #{n:<20} {c.repo}  [{what}]")
+    print("Anyone in these channels can run what the channel allows.")
     try:
         SocketModeHandler(app, app_token).start()
     except Exception as e:

@@ -39,8 +39,6 @@ full `billing/proration-e4f`.
 3. **Install App → Install to Workspace**. This is `SLACK_BOT_TOKEN`
    (`xoxb-…`).
 4. In Slack, invite the bot to each channel: `/invite @rigg`.
-5. Your own member ID, for `allowed_users`: click your avatar → *Profile* →
-   the ⋮ menu → *Copy member ID* (`U…`).
 
 ## Running it
 
@@ -51,19 +49,30 @@ export SLACK_APP_TOKEN=xapp-...
 uv run --with slack-bolt slack/rigg_slack.py
 ```
 
-`channels.toml` maps each channel name to a repo, and optionally lists the
-Slack user IDs allowed to drive an agent:
+## Who is allowed
+
+Whoever is in the channel. Slack already decides that, and a second list of
+user IDs here would only duplicate it and then drift from it — so the channel
+*is* the boundary, and an unmapped channel does nothing at all.
+
+Which means a channel you map is a channel whose members you are handing an
+agent to. A message becomes a prompt for an agent running with
+`bypassPermissions`, so put it in a **private** channel. If you map a public
+one the bridge says so the first time it sees a message there.
+
+`commands` narrows what a channel may do, which is how a wider channel can
+watch without being able to start work:
 
 ```toml
-[channels.amino]
+# Private, just you: everything.
+[channels.aksel-dev]
 repo = "~/git/amino-monorepo"
 
-allowed_users = ["U01ABCDEFG"]
+# The team can look, not launch. They see this channel's stacks, not yours.
+[channels.support]
+repo = "~/git/amino-monorepo"
+commands = ["stacks", "logs", "help"]
 ```
-
-**Leave `allowed_users` out and anyone in those channels can run an agent on
-this machine.** A Slack message becomes a prompt for an agent running with
-`bypassPermissions`; that is code execution, and the bridge says so at startup.
 
 ## Reporting back
 
@@ -99,5 +108,7 @@ can be exercised against a scratch repo with no Slack credentials at all.
 
 - **A `confirm` step blocks a detached run**, so a pipeline with one cannot be
   started from Slack at all. rigg says so rather than skipping the step.
-- No approval buttons — every message from an allowed user runs immediately.
+- No approval buttons — every message in an allowed channel runs immediately.
+- Always runs the repo's default pipeline; no way to pick `full-preview` from
+  Slack yet.
 - `say` holds a worker thread for the whole turn; four can run at once.

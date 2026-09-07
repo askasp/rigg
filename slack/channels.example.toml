@@ -1,15 +1,22 @@
-# Which repository each Slack channel drives. Keyed by channel name, no '#'.
+# Which repository each Slack channel drives.
 #
-# Stacks a channel starts are named <channel>/<slug>, so two channels can share
-# a repo without colliding, and each sees only its own stacks.
+# Who may drive it is Slack's business: whoever is in the channel can run what
+# the channel allows. So a channel you map is a channel whose members you are
+# giving an agent to — put it in a private channel.
+#
+# Stacks a channel starts are named <channel>/<slug>, so several channels can
+# share one repo without colliding and each sees only its own stacks.
 
-[channels.amino]
+# Private channel, just you: everything allowed.
+[channels.aksel-dev]
 repo = "~/git/amino-monorepo"
 
+# Support channel on the same repo: the team can watch, but not start work.
+# Their `stacks` and `logs` show this channel's stacks, not aksel-dev's.
+[channels.support]
+repo = "~/git/amino-monorepo"
+commands = ["stacks", "logs", "help"]
+
+# A different repo entirely.
 [channels.rigg-dev]
 repo = "~/git/rigg"
-
-# Slack user IDs allowed to drive an agent. A message here becomes a prompt for
-# an agent running with bypassPermissions, so this is the list of people who may
-# execute code on this machine. Leave it out and everyone in the channel can.
-# allowed_users = ["U01ABCDEFG"]
