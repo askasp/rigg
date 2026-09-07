@@ -41,7 +41,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 
 | | |
 | --- | --- |
-| `stacks` | a name per stack in the channel; open one for its card (`list`, `status`) |
+| `stacks` | live stacks and where each has got to; clears merged ones (`list`, `status`) |
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
 | `parts` | the optional parts this repo has |
@@ -105,6 +105,12 @@ you mean:
 That works in any thread belonging to a stack: the one `stacks` posted, or the
 one a run reports into. It applies to `add`, `say`, `stop`, `retry`,
 `continue`, `urls`, `logs` and `rm`.
+
+A listing first clears any stack in this channel whose every branch has landed
+on the trunk — a merged stack is finished with, and the next piece of work
+wants a new one. Each is removed through its own teardown, so a merged branch
+stops holding a dev stack and its tunnels. A stack with a run in flight is
+never touched.
 
 A listing puts names in the channel and everything else - branches, state,
 preview URLs - one level down in each name's thread, so it stays glanceable

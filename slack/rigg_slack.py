@@ -812,6 +812,33 @@ def cmd_parts(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         f"`redo the payment screen +preview`.")
 
 
+def branch_state(line: str) -> tuple[str, str]:
+    """A branch and its state, out of one line of `rigg stack list`."""
+    body = re.sub(r"^\s*\*?\s*\d+\.\s*", "", line.strip())
+    state = ""
+    m = re.search(r"\[(.+)\]\s*$", body)
+    if m:
+        state = m.group(1)
+        body = body[: m.start()]
+    branch = body.split("<-")[0].strip()
+    return branch, state
+
+
+def merged_into_trunk(repo: Path, branch: str) -> bool:
+    """Whether a branch is already contained in the trunk."""
+    for trunk in ("origin/main", "main"):
+        r = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", branch, trunk],
+            cwd=repo, capture_output=True,
+        )
+        if r.returncode == 0:
+            return True
+        # 1 is a clean "no"; anything else means the ref was not resolvable.
+        if r.returncode == 1:
+            return False
+    return False
+
+
 def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     """One message per stack, so each gets a thread to be talked to in."""
     code, out = run_rigg(repo, ["stack", "list"])
@@ -832,12 +859,35 @@ def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         elif blocks and line.strip():
             blocks[-1][1].append(line.strip())
 
+    # A stack whose every branch has landed is finished with: the next piece
+    # of work wants a new one, not this. Clearing them here keeps the listing
+    # about what is live, and runs each stack's teardown on the way out so a
+    # merged branch stops holding a dev stack and its tunnels.
+    live, gone = [], []
+    for name, branches in blocks:
+        heads = [branch_state(b)[0] for b in branches]
+        running = any("running" in branch_state(b)[1] for b in branches)
+        if heads and not running and all(merged_into_trunk(repo, h) for h in heads):
+            code, _ = run_rigg(repo, ["stack", "rm", name, "--yes"], timeout=600)
+            (gone if code == 0 else live).append(name if code == 0 else (name, branches))
+        else:
+            live.append((name, branches))
+    if gone:
+        merged = ", ".join(f"`{g.split('/', 1)[-1]}`" for g in gone)
+        say(f"_Cleared {len(gone)} merged stack(s): {merged}_")
+    blocks = live
+    if not blocks:
+        say("nothing live in this channel — `new <task>` starts something")
+        return
+
     say(f"*{len(blocks)} stack(s)* — open one to see it or talk to it.")
     for name, branches in blocks:
         short = name.split("/", 1)[1] if "/" in name else name
-        # The channel carries names only. Everything else goes one level down,
-        # so a listing stays glanceable however many stacks there are.
-        posted = say(f"*{short}*")
+        # The name carries where it has got to, so the channel answers "what
+        # is happening" without anything having to be opened.
+        states = [branch_state(b)[1] for b in branches]
+        state = next((x for x in states if "running" in x), "") or states[-1] or "pending"
+        posted = say(f"*{short}* — {state}")
         ts = ts_of(posted)
         if not ts:
             continue
