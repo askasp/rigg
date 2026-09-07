@@ -73,6 +73,19 @@ because it also stops whatever the branch had running — a dev stack, a tunnel.
    (`xoxb-…`).
 4. In Slack, invite the bot to each channel: `/invite @rigg`.
 
+**Ignore the App Credentials block** on the Basic Information page — App ID,
+Client ID, Client Secret, Signing Secret, Verification Token. None of them is
+used here, and copying them anywhere is only a way to leak them:
+
+| | |
+| --- | --- |
+| Client ID / Secret | the OAuth flow for installing into *other* workspaces. This app is installed directly into yours. |
+| Signing Secret | verifies inbound HTTP webhooks. Socket Mode has no inbound HTTP. |
+| Verification Token | the deprecated predecessor of the signing secret. |
+| App ID | an identifier, not a secret. |
+
+The token you want is further down that same page, under **App-Level Tokens**.
+
 ## Running it
 
 Put the two tokens in `slack/.env` (gitignored, so they stay out of shell
