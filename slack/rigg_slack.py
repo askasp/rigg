@@ -13,12 +13,17 @@ a channel only its own work.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import random
 import re
 import string
+import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -217,6 +222,68 @@ def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str) -> No
     )
 
 
+def download_images(event: dict, token: str) -> tuple[list[str], str | None]:
+    """Save any images attached to a Slack message, and say where they went.
+
+    Slack keeps a file behind an authenticated URL, so this needs the bot token
+    and the `files:read` scope - a plain fetch returns Slack's sign-in page
+    with a 200, which is why the content type is checked rather than trusted.
+
+    Returns the paths and the temp directory holding them, for the caller to
+    clean up once rigg has copied them into its own staging.
+    """
+    files = [
+        f for f in event.get("files", [])
+        if str(f.get("mimetype", "")).startswith("image/")
+    ]
+    if not files:
+        return [], None
+
+    tmp = tempfile.mkdtemp(prefix="rigg-slack-")
+    paths = []
+    for i, f in enumerate(files, 1):
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        ext = (
+            mimetypes.guess_extension(f["mimetype"])
+            or os.path.splitext(f.get("name", ""))[1]
+            or ".png"
+        )
+        dest = os.path.join(tmp, f"{i}{'.jpg' if ext == '.jpe' else ext}")
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                kind = r.headers.get("Content-Type", "")
+                if not kind.startswith("image/"):
+                    print(f"slack file {f.get('name')}: got {kind!r}, not an image "
+                          f"— is the files:read scope granted?")
+                    continue
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(r, out)
+        except (urllib.error.URLError, OSError) as e:
+            print(f"could not fetch slack file {f.get('name')}: {e}")
+            continue
+        paths.append(dest)
+    if not paths:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return [], None
+    return paths, tmp
+
+
+def image_args(images: list[str]) -> list[str]:
+    """rigg flags for attached images.
+
+    `--no-paste` always: rigg would otherwise read the clipboard of whatever
+    desktop this bridge happens to be running on, which has nothing to do with
+    the person who sent the message.
+    """
+    args = ["--no-paste"]
+    for p in images:
+        args += ["--image", p]
+    return args
+
+
 def slug(task: str) -> str:
     words = re.findall(r"[a-z0-9]+", task.lower())[:4]
     stem = "-".join(words)[:32].strip("-") or "task"
@@ -272,12 +339,13 @@ def filter_stack_list(out: str, prefix: str) -> str:
 
 
 def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
-            pipeline: str | None = None) -> None:
-    if not rest:
+            pipeline: str | None = None, images: list[str] | None = None) -> None:
+    images = images or []
+    if not rest and not images:
         say("give me a task: `new <task>`")
         return
-    stack = f"{prefix}/{slug(rest)}"
-    args = ["new", stack, rest]
+    stack = f"{prefix}/{slug(rest or 'from an image')}"
+    args = ["new", stack, rest] + image_args(images)
     if pipeline:
         args += ["--pipeline", pipeline]
     code, out = run_rigg(repo, args)
@@ -299,7 +367,8 @@ def resolve(repo: Path, prefix: str, short: str, say) -> str | None:
     return None
 
 
-def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str,
+            pipeline: str | None = None, images: list[str] | None = None) -> None:
     parts = rest.split(None, 1)
     if len(parts) < 2:
         say("`add <stack> <task>`")
@@ -308,7 +377,7 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     stack = resolve(repo, prefix, short, say)
     if stack is None:
         return
-    code, out = run_rigg(repo, ["add", stack, task])
+    code, out = run_rigg(repo, ["add", stack, task] + image_args(images or []))
     if code != 0:
         say(f"could not extend `{stack}`:\n```\n{out[:2500]}\n```")
         return
@@ -319,7 +388,8 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         remember_thread(repo, branch, channel, ts)
 
 
-def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
+            pipeline: str | None = None, images: list[str] | None = None) -> None:
     parts = rest.split(None, 1)
     if len(parts) < 2:
         say("`say <stack> <message>`")
@@ -330,7 +400,9 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         return
     say(f"passing that to `{stack}`...")
     # A turn takes as long as it takes; the ack above is what keeps Slack happy.
-    code, out = run_rigg(repo, ["say", stack, message], timeout=3600)
+    code, out = run_rigg(
+        repo, ["say", stack, message] + image_args(images or []), timeout=3600
+    )
     tail = "\n".join(out.splitlines()[-25:])
     say(f"{'done' if code == 0 else 'failed'} — `{stack}`\n```\n{tail[:2500]}\n```")
 
@@ -628,15 +700,30 @@ def main() -> int:
             say(refusal)
             return
 
+        images, tmp = download_images(event, bot_token)
+        if images:
+            reply_ts = event.get("thread_ts") or event["ts"]
+            say(text=f"got {len(images)} image(s)", thread_ts=reply_ts)
+
         def reply(text: str):
             # Threading every reply under the request keeps a channel with
             # several stacks in flight readable.
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
 
-        if pipeline:
-            pool.submit(fn, channel.repo, name, rest, reply, event["channel"], pipeline)
-        else:
-            pool.submit(fn, channel.repo, name, rest, reply, event["channel"])
+        def work():
+            try:
+                if fn in (cmd_new, cmd_add, cmd_say):
+                    fn(channel.repo, name, rest, reply, event["channel"],
+                       pipeline, images)
+                else:
+                    fn(channel.repo, name, rest, reply, event["channel"])
+            finally:
+                # rigg copies them into its own staging while it runs, so they
+                # are only needed for the length of the call.
+                if tmp:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+        pool.submit(work)
 
     app.event("app_mention")(lambda event, client, say: handle(event, client, say))
 

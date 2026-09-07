@@ -150,6 +150,28 @@ Then start it:
 It prints the channel→repo map and stays in the foreground. Socket Mode dials
 out to Slack, so there is no port to open and nothing to expose.
 
+## Images
+
+Paste a screenshot into the message and the agent gets it:
+
+```
+@rigg preview [screenshot] this banner is misaligned, fix the spacing
+```
+
+The bridge downloads anything image-shaped attached to the message, hands it to
+rigg with `--image`, and rigg puts it in `.rigg/media/` inside the branch's
+checkout with the prompt naming the files. Works with `new`, a pipeline word,
+`add` and `say`, and several images at once.
+
+This needs the **`files:read`** scope. Slack keeps files behind an
+authenticated URL, and without the scope a fetch returns Slack's sign-in page
+as a `200` — so the bridge checks the content type rather than trusting the
+status, and says so when the scope is missing.
+
+The bridge always passes `--no-paste`. rigg reads the clipboard when a person
+runs it in a terminal; the clipboard of whatever desktop the bridge happens to
+run on has nothing to do with whoever sent the message.
+
 ## Reporting back
 
 Progress arrives through rigg's notify hook, which the bridge does not have to
