@@ -126,6 +126,10 @@ end of the prompt, so the agent reads them as files. That directory is added to
 Needs `wl-paste` (Wayland) or `xclip` (X11) for the clipboard; `--image` works
 without either.
 
+`rigg stop <stack>` cancels a run in flight. The run is its own process group,
+so the agent and any shell step under it go down with it rather than being
+orphaned; the branch is then marked `stopped` rather than failed.
+
 `say` with no arguments picks a stack and then asks what to send, the same shape
 as `attach` and `logs`. `stack rm` removes a whole stack, refusing any branch
 that is still running, has uncommitted work, or holds commits that are not on

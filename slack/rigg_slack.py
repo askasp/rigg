@@ -26,18 +26,68 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RIGG = os.environ.get("RIGG_BIN", str(HERE.parent / "target" / "release" / "rigg"))
 
-HELP = """*rigg* — one repo per channel, stacks scoped to this channel.
+# Grouped by what you are trying to do, because an alphabetical list of verbs
+# is only useful to someone who already knows which one they want.
+HELP_GROUPS = [
+    ("Start work", [
+        ("new <task>", "a stack, on the default pipeline"),
+        ("add <stack> <task>", "stack another branch on top of one"),
+    ]),
+    ("While it is running", [
+        ("say <stack> <message>", "a follow-up turn in that stack's session"),
+        ("stop <stack>", "cancel it — `cancel` works too"),
+        ("retry <stack> [step]", "run it again, from a step if you name one"),
+    ]),
+    ("Have a look", [
+        ("stacks", "this channel's stacks and how they are doing"),
+        ("logs <stack>", "the tail of a run's log"),
+        ("urls <stack>", "links the run printed — previews, PRs"),
+        ("pipelines", "what this repo offers"),
+    ]),
+    ("When it has landed", [
+        ("rm <stack>", "what removing it would do"),
+        ("rm <stack> yes", "actually remove it, stopping whatever it started"),
+    ]),
+]
 
-• `new <task>` — start a stack and run the default pipeline on it
-• `<pipeline> <task>` — the same, with a named pipeline: `preview fix the button`
-• `pipelines` — which pipelines this repo has
-• `add <stack> <task>` — stack the next branch on top of one
-• `say <stack> <message>` — another turn in that stack's session
-• `stacks` — this channel's stacks and their state
-• `logs <stack>` — the tail of a run's log
-• `help` — this
 
-Stacks are named `<channel>/<slug>`; refer to them by the short name."""
+def short_alias(name: str, names: list[str]) -> str:
+    """The shortest obvious way to type a pipeline name."""
+    if "-" in name:
+        tail = name.rsplit("-", 1)[1]
+        if len([n for n in names if tail in n]) == 1:
+            return tail
+    return name
+
+
+def help_for(channel: "Channel") -> str:
+    lines = [f"*rigg* — #{channel.name} drives `{channel.repo}`"]
+    names = pipelines(channel.repo)
+
+    for title, entries in HELP_GROUPS:
+        rows = [(c, d) for c, d in entries if channel.may(c.split()[0]) is None]
+        # Pipelines belong with the other ways of starting work.
+        if title == "Start work" and channel.may("new") is None:
+            extra = [
+                (f"{short_alias(n, names)} <task>", f"a stack, on `{n}`")
+                for n in names
+                if short_alias(n, names) != "new"
+            ]
+            rows = rows[:1] + extra + rows[1:]
+        if not rows:
+            continue
+        width = max(len(c) for c, _ in rows)
+        lines.append(f"\n*{title}*")
+        lines += [f"`{c.ljust(width)}`  {d}" for c, d in rows]
+
+    lines.append(
+        "\nStacks here are named `%s/<slug>` and belong to this channel — "
+        "refer to them by the short name, and other channels cannot see them."
+        % channel.name
+    )
+    if channel.commands is not None:
+        lines.append("This channel is read-only for anything not listed.")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +262,15 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
         remember_thread(repo, stack, channel, ts)
 
 
+def resolve(repo: Path, prefix: str, short: str, say) -> str | None:
+    """Turn a short name typed in Slack into this channel's full stack name."""
+    stack = short if short.startswith(f"{prefix}/") else f"{prefix}/{short}"
+    if stack in own_stacks(repo, prefix):
+        return stack
+    say(f"no stack `{short}` in this channel. `stacks` lists them.")
+    return None
+
+
 def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     parts = rest.split(None, 1)
     if len(parts) < 2:
@@ -259,6 +318,73 @@ def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None
     say(f"pipelines here:\n{lines}\n\n`new <task>` runs the default one.")
 
 
+def cmd_stop(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    if not rest:
+        say("`stop <stack>` — which one?")
+        return
+    stack = resolve(repo, prefix, rest.split()[0], say)
+    if stack is None:
+        return
+    code, out = run_rigg(repo, ["stop", stack])
+    say(out or ("stopped" if code == 0 else "could not stop it"))
+
+
+def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """Run the pipeline again on a branch, optionally from a named step."""
+    parts = rest.split()
+    if not parts:
+        say("`retry <stack> [step]` — which one?")
+        return
+    stack = resolve(repo, prefix, parts[0], say)
+    if stack is None:
+        return
+    # `run` works on the checkout it is in, so find that first.
+    code, dir_out = run_rigg(repo, ["attach", "--path", stack])
+    if code != 0:
+        say(f"no checkout for `{stack}`:\n```\n{dir_out[:800]}\n```")
+        return
+    args = ["run", "--detach"]
+    if len(parts) > 1:
+        args += ["--from", parts[1]]
+    code, out = run_rigg(Path(dir_out.strip()), args)
+    say(f"```\n{out[:1500]}\n```" if out else ("restarted" if code == 0 else "failed"))
+
+
+def cmd_urls(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """Whatever links the last run printed - preview URLs, PRs."""
+    if not rest:
+        say("`urls <stack>` — which one?")
+        return
+    stack = resolve(repo, prefix, rest.split()[0], say)
+    if stack is None:
+        return
+    code, out = run_rigg(repo, ["logs", stack])
+    seen: list[str] = []
+    for m in re.findall(r"https?://[^\s`\"'<>)]+", out):
+        if m not in seen:
+            seen.append(m)
+    if not seen:
+        say(f"no links in `{stack}`'s log yet")
+        return
+    say("\n".join(f"• {u}" for u in seen[-12:]))
+
+
+def cmd_rm(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """Remove a stack. A dry run unless the word `yes` follows, as in the CLI."""
+    parts = rest.split()
+    if not parts:
+        say("`rm <stack>` to see what would go, `rm <stack> yes` to do it")
+        return
+    stack = resolve(repo, prefix, parts[0], say)
+    if stack is None:
+        return
+    args = ["stack", "rm", stack]
+    if len(parts) > 1 and parts[1].lower() in ("yes", "y", "confirm"):
+        args.append("--yes")
+    code, out = run_rigg(repo, args, timeout=600)
+    say(f"```\n{out[:2500]}\n```" if out else "nothing to say")
+
+
 def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     code, out = run_rigg(repo, ["stack", "list"])
     if code != 0:
@@ -287,6 +413,13 @@ COMMANDS = {
     "status": cmd_stacks,
     "logs": cmd_logs,
     "pipelines": cmd_pipelines,
+    "help": None,  # answered in dispatch, which knows the channel
+    "stop": cmd_stop,
+    "cancel": cmd_stop,
+    "retry": cmd_retry,
+    "urls": cmd_urls,
+    "rm": cmd_rm,
+    "remove": cmd_rm,
 }
 
 
@@ -370,6 +503,9 @@ def main() -> int:
             return
 
         verb, rest = parse(event.get("text", ""))
+        if verb == "help":
+            say(help_for(channel))
+            return
         fn = COMMANDS.get(verb)
         pipeline = None
         if fn is None:
@@ -380,7 +516,7 @@ def main() -> int:
                 say(ambiguous)
                 return
             if pipeline is None:
-                say(HELP)
+                say(help_for(channel))
                 return
             fn = cmd_new
         refusal = channel.may(verb)

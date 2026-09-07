@@ -14,18 +14,40 @@ work. Progress reports back into the thread that asked for it.
 
 ## Commands
 
-Mention the bot in a channel, or DM it.
+Mention the bot in a channel, or DM it. `help` prints the list that *this*
+channel is allowed to use, with the repo's own pipeline names filled in.
+
+**Start work**
 
 | | |
 | --- | --- |
-| `new <task>` | start a stack and run the default pipeline |
-| `<pipeline> <task>` | the same with a named pipeline: `preview fix the button` |
-| `pipelines` | which pipelines this repo has |
-| `add <stack> <task>` | stack the next branch on top of one |
-| `say <stack> <message>` | another turn in that stack's session |
-| `stacks` | this channel's stacks and their state |
+| `new <task>` | a stack, on the default pipeline |
+| `<pipeline> <task>` | a stack, on a named one: `preview fix the button` |
+| `add <stack> <task>` | stack another branch on top of one |
+
+**While it is running**
+
+| | |
+| --- | --- |
+| `say <stack> <message>` | a follow-up turn in that stack's session |
+| `stop <stack>` | cancel it (`cancel` also works) |
+| `retry <stack> [step]` | run it again, from a step if you name one |
+
+**Have a look**
+
+| | |
+| --- | --- |
+| `stacks` | this channel's stacks and how they are doing |
 | `logs <stack>` | the tail of a run's log |
-| `help` | the above |
+| `urls <stack>` | links the run printed — previews, PRs |
+| `pipelines` | what this repo offers |
+
+**When it has landed**
+
+| | |
+| --- | --- |
+| `rm <stack>` | what removing it would do |
+| `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
 
 Stacks are referred to by their short name — `add proration-e4f "..."`, not the
 full `billing/proration-e4f`.
@@ -35,6 +57,9 @@ part of it will do — `preview fix the button` reaches `full-preview`. A flag
 would have been fewer lines here and worse to explain to anyone who does not
 write code for a living. `commands` gates these like any other verb, so a
 channel limited to `stacks` and `logs` cannot start one.
+
+`rm` mirrors the CLI in being a dry run until you add `yes`, which matters
+because it also stops whatever the branch had running — a dev stack, a tunnel.
 
 ## Setting up the Slack app
 

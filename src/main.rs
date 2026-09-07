@@ -141,6 +141,9 @@ enum Cmd {
         /// Print what would happen without touching any agent.
         #[arg(long)]
         dry_run: bool,
+        /// Run in the background and return, as `new` and `add` do.
+        #[arg(long)]
+        detach: bool,
     },
     /// Show the shell keybindings and aliases.
     Keys {
@@ -161,6 +164,11 @@ enum Cmd {
     Status,
     /// Print the pipeline names, one per line.
     Pipelines,
+    /// Stop a run that is still going.
+    Stop {
+        /// Stack or branch. Omit to choose.
+        target: Option<String>,
+    },
     /// Check that the environment can actually drive agents.
     Doctor,
     /// Manage a stack of dependent branches.
@@ -437,11 +445,31 @@ fn real_main() -> Result<()> {
             from,
             only,
             dry_run,
-        } => execute(
-            &root,
-            cli.config.as_deref(),
-            RunOpts { pipeline, task, base, from, only, dry_run },
-        )?,
+            detach,
+        } => {
+            let opts = RunOpts { pipeline, task, base, from, only, dry_run };
+            if detach {
+                let branch = util::current_branch(&root)?;
+                start_detached(&root, &root, &branch, opts)?;
+            } else {
+                execute(&root, cli.config.as_deref(), opts)?;
+            }
+        }
+
+        Cmd::Stop { target } => {
+            let st = Stacks::load(&root)?;
+            let entry = match target {
+                Some(t) => resolve_target(&root, &st, &t)?,
+                None => pick_stack(&root, &st)?,
+            };
+            match running_pid(&root, &entry.branch) {
+                None => println!("nothing running on `{}`", entry.branch),
+                Some(pid) => {
+                    stop_run(&root, &entry.branch, pid)?;
+                    println!("stopped `{}`", entry.branch);
+                }
+            }
+        }
 
         Cmd::New {
             name,
@@ -1056,6 +1084,8 @@ fn run_state(root: &std::path::Path, e: &Entry) -> String {
     }
     match last_status(root, branch).as_deref() {
         Some("ok") => "done".into(),
+        // Cancelled on purpose, so not a failure to report as one.
+        Some("stopped") => "stopped".into(),
         Some(other) => {
             let short = other.strip_prefix("failed: ").unwrap_or(other);
             format!("failed {}", short.split(" after ").next().unwrap_or(short))
@@ -1262,6 +1292,37 @@ fn start_detached(
     println!("started `{branch}` in the background (pid {})", child.id());
     println!("  rigg logs {branch} -f");
     println!("  rigg attach {branch}");
+    Ok(())
+}
+
+/// Stop a detached run and everything it started.
+///
+/// The run is its own process group - `start_detached` puts it there with
+/// setsid - so signalling the group is what reaches the agent and any shell
+/// step under it. Killing the pid alone would leave those orphaned and still
+/// holding the branch.
+fn stop_run(root: &std::path::Path, branch: &str, pid: u32) -> Result<()> {
+    let group = format!("-{pid}");
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &group])
+        .status();
+    // Give it a moment to go down politely before insisting.
+    for _ in 0..20 {
+        if running_pid(root, branch).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    if running_pid(root, branch).is_some() {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &group])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    record_status(root, branch, "stopped");
+    if let Ok(p) = pid_path(root, branch) {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(())
 }
 
