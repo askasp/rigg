@@ -213,11 +213,16 @@ enum Cmd {
     Continue {
         /// Stack or branch. Omit to choose.
         target: Option<String>,
-        /// Pipeline to carry on with. Defaults to the one the branch last ran,
-        /// so `--pipeline full-preview` is how a `preview` branch gets the
-        /// Copilot round it never had.
+        /// Pipeline to carry on with. Defaults to the one the branch last ran.
         #[arg(long)]
         pipeline: Option<String>,
+        /// Turn an optional part on for the rest of the run: `--with copilot`
+        /// is how a branch gets a round it was not started with.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn one off.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -501,11 +506,6 @@ fn real_main() -> Result<()> {
 
         Cmd::Pipelines => {
             let cfg = Config::load(&root, cli.config.as_deref())?;
-            // The unnamed top-level pipeline has nothing to call it by, so it
-            // only appears when it is the one that would actually run.
-            if cfg.default_pipeline.is_none() && !cfg.steps.is_empty() {
-                println!("steps");
-            }
             for name in cfg.pipelines.keys() {
                 println!("{name}");
             }
@@ -572,7 +572,7 @@ fn real_main() -> Result<()> {
             }
         }
 
-        Cmd::Continue { target, pipeline, fg } => {
+        Cmd::Continue { target, pipeline, with_features, without_features, fg } => {
             let st = Stacks::load(&root)?;
             let entry = match target {
                 Some(t) => resolve_target(&root, &st, &t)?,
@@ -590,7 +590,9 @@ fn real_main() -> Result<()> {
             let pipeline = pipeline
                 .or_else(|| recorded.as_ref().and_then(|(p, _)| p.clone()))
                 .or_else(|| logged_pipeline(&root, &entry.branch));
-            let steps = pipeline_steps(&cfg, pipeline.as_deref(), &[], &[])?;
+            let steps = pipeline_steps(
+                &cfg, pipeline.as_deref(), &with_features, &without_features,
+            )?;
 
             // The log records each step by its description, or its id when it
             // has none - which is how a step is matched across two pipelines
@@ -645,7 +647,10 @@ fn real_main() -> Result<()> {
                 pipeline.as_deref().unwrap_or("steps"),
                 steps.len() - next
             );
-            let opts = RunOpts { pipeline, from: Some(from), ..Default::default() };
+            let opts = RunOpts {
+                pipeline, from: Some(from), with_features, without_features,
+                ..Default::default()
+            };
             if fg {
                 execute(dirp, None, opts)?;
             } else {

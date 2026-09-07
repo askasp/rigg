@@ -35,26 +35,34 @@ RIGG = os.environ.get("RIGG_BIN", str(HERE.parent / "target" / "release" / "rigg
 # is only useful to someone who already knows which one they want.
 HELP_GROUPS = [
     ("Start work", [
-        ("new <task>", "a stack, on the default pipeline"),
+        ("new <task>", "do it, review it, fix what the review found, and put it on a URL"),
         ("add <stack> <task>", "stack another branch on top of one"),
     ]),
     ("While it is running", [
         ("say <stack> <message>", "a follow-up turn in that stack's session"),
         ("stop <stack>", "cancel it — `cancel` works too"),
-        ("retry <stack> [step]", "run it again, from a step if you name one"),
-        ("continue <stack> [pipeline]", "take it further: `continue foo full-preview`"),
+        ("continue <stack> +part", "take it further, e.g. `continue foo +copilot`"),
+        ("retry <stack> [step]", "run the same thing again"),
     ]),
     ("Have a look", [
         ("stacks", "this channel's stacks and how they are doing"),
         ("logs <stack>", "the tail of a run's log"),
         ("urls <stack>", "links the run printed — previews, PRs"),
-        ("pipelines", "what this repo offers"),
-        ("parts", "optional parts you can add with `+name`"),
+        ("parts", "the optional parts you can add"),
     ]),
     ("When it has landed", [
         ("rm <stack>", "what removing it would do"),
         ("rm <stack> yes", "actually remove it, stopping whatever it started"),
     ]),
+]
+
+# Put on the end of a task to change one run. Everything here is optional; the
+# whole point is that `new <task>` on its own already does the sensible thing.
+MODIFIERS = [
+    ("+copilot", "also wait for Copilot's review and apply it"),
+    ("-preview", "skip the running copy"),
+    ("effort=high", "a heavier review — low, medium, high, max"),
+    ("ai=opencode", "run it on a different agent"),
 ]
 
 
@@ -73,25 +81,24 @@ def help_for(channel: "Channel") -> str:
 
     for title, entries in HELP_GROUPS:
         rows = [(c, d) for c, d in entries if channel.may(c.split()[0]) is None]
-        # Pipelines belong with the other ways of starting work.
-        if title == "Start work" and channel.may("new") is None:
-            extra = [
-                (f"{short_alias(n, names)} <task>", f"a stack, on `{n}`")
+        # A repo that names variations of its pipeline offers those here too.
+        if title == "Start work" and channel.may("new") is None and names:
+            rows += [
+                (f"{short_alias(n, names)} <task>", f"the same, on `{n}`")
                 for n in names
-                if short_alias(n, names) != "new"
             ]
-            rows = rows[:1] + extra + rows[1:]
         if not rows:
             continue
         width = max(len(c) for c, _ in rows)
         lines.append(f"\n*{title}*")
         lines += [f"`{c.ljust(width)}`  {d}" for c, d in rows]
 
-    lines.append(
-        "\nAdd to the end of a task, in any order: `+preview` / `-copilot` to "
-        "turn a part on or off, `effort=high` to set a prompt setting, "
-        "`with opencode` to use another agent."
-    )
+    if channel.may("new") is None:
+        width = max(len(m) for m, _ in MODIFIERS)
+        lines.append("\n*Put on the end of a task, in any order*")
+        lines += [f"`{m.ljust(width)}`  {d}" for m, d in MODIFIERS]
+        lines.append("`parts` lists every part this repo has.")
+
     lines.append(
         "\nStacks here are named `%s/<slug>` and belong to this channel — "
         "refer to them by the short name, and other channels cannot see them."
@@ -314,10 +321,17 @@ def split_vars(text: str) -> tuple[str, list[str]]:
     return " ".join(words), found
 
 
+# `ai=` is not a prompt placeholder but a choice of agent. Spelling both as
+# name=value means there is one thing to learn instead of two.
+VAR_ALIASES = {"ai": "--agent", "agent": "--agent"}
+
+
 def var_args(vars: list[str]) -> list[str]:
     out: list[str] = []
     for v in vars:
-        out += ["--var", v]
+        name, _, value = v.partition("=")
+        flag = VAR_ALIASES.get(name.lower())
+        out += [flag, value] if flag else ["--var", v]
     return out
 
 
@@ -495,7 +509,8 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
 def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     names = pipelines(repo)
     if not names:
-        say("no pipelines configured in this repo")
+        say("This repo has one pipeline and no names for variations of it — "
+            "use `+part` / `-part` instead. `parts` lists them.")
         return
     lines = "\n".join(f"• `{short_alias(n, names)} <task>`" for n in names)
     say(f"pipelines here:\n{lines}\n\n`new <task>` runs the default one.")
@@ -548,7 +563,7 @@ def pipeline_of(repo: Path, stack: str) -> str | None:
     return m.group(1) if m else None
 
 
-def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:  # noqa: C901
     """Take a branch further than the pipeline it was started with.
 
     Distinct from `retry`, which runs the same pipeline again: this one picks
@@ -563,13 +578,19 @@ def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     if stack is None:
         return
     args = ["continue", stack]
-    if len(parts) > 1:
+    # `continue foo +copilot` is the usual shape now that parts replaced
+    # pipeline names; a bare name still works where a repo has them.
+    rest_after = " ".join(parts[1:])
+    _, mods = split_modifiers(rest_after)
+    if mods:
+        args += mods
+    elif len(parts) > 1:
         name, ambiguous = match_pipeline(repo, parts[1])
         if ambiguous:
             say(ambiguous)
             return
         if name is None:
-            say(f"`{parts[1]}` is not a pipeline here — `pipelines` lists them")
+            say(f"`{parts[1]}` is neither a part nor a pipeline — try `parts`")
             return
         args += ["--pipeline", name]
     code, out = run_rigg(repo, args, timeout=300)

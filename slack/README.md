@@ -14,15 +14,18 @@ work. Progress reports back into the thread that asked for it.
 
 ## Commands
 
-Mention the bot in a channel, or DM it. `help` prints the list that *this*
-channel is allowed to use, with the repo's own pipeline names filled in.
+```
+@rigg new redo the payment screen
+```
+
+That is the whole common case: it does the work, reviews it, fixes what the
+review found, and hands back a URL to look at. Everything below is optional.
 
 **Start work**
 
 | | |
 | --- | --- |
-| `new <task>` | a stack, on the default pipeline |
-| `<pipeline> <task>` | a stack, on a named one: `preview fix the button` |
+| `new <task>` | the above |
 | `add <stack> <task>` | stack another branch on top of one |
 
 **While it is running**
@@ -31,8 +34,8 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | --- | --- |
 | `say <stack> <message>` | a follow-up turn in that stack's session |
 | `stop <stack>` | cancel it (`cancel` also works) |
-| `retry <stack> [step]` | run the same pipeline again, from a step if you name one |
-| `continue <stack> [pipeline]` | take it further than it was started with |
+| `continue <stack> +part` | take it further than it was started with |
+| `retry <stack> [step]` | run the same thing again |
 
 **Have a look**
 
@@ -41,8 +44,8 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `stacks` | this channel's stacks and how they are doing |
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
-| `pipelines` | what this repo offers |
-| `parts` | the optional parts, and which pipelines turn each on |
+| `parts` | the optional parts this repo has |
+| `pipelines` | named pipelines, where a repo has any |
 
 **When it has landed**
 
@@ -51,27 +54,26 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `rm <stack>` | what removing it would do |
 | `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
 
-End a task with `+preview` or `-copilot` to turn an optional part on or off.
+### Changing one run
 
-End it with `effort=high` to set a prompt placeholder — several are fine,
-and they are only taken off the end, so "set FOO=bar in the config" stays a
-task.
+Put any of these on the end of a task, in any order:
 
-End it with `with opencode` (or `on codex`, `using claude`) to run it on a
-different agent — `claude`, `opencode`, `codex` and `gemini` are recognised
-there, and nothing else is, so "make it work with caching" stays a task.
+| | |
+| --- | --- |
+| `+copilot` / `-preview` | turn an optional part on or off — `parts` lists them |
+| `effort=high` | set a prompt placeholder |
+| `ai=opencode` | run it on a different agent |
+
+```
+@rigg new redo the payment screen +copilot effort=high ai=opencode
+```
+
+They are only taken off the end, and `+x` / `-x` only when they look like a
+part — so "make the button 2+2 wide" and "set FOO=bar in the config" stay
+tasks.
 
 Stacks are referred to by their short name — `add proration-e4f "..."`, not the
 full `billing/proration-e4f`.
-
-A pipeline is chosen by typing its name instead of `new`, and any unambiguous
-part of it will do — `preview fix the button` reaches `full-preview`. A flag
-would have been fewer lines here and worse to explain to anyone who does not
-write code for a living. `commands` gates these like any other verb, so a
-channel limited to `stacks` and `logs` cannot start one.
-
-`rm` mirrors the CLI in being a dry run until you add `yes`, which matters
-because it also stops whatever the branch had running — a dev stack, a tunnel.
 
 ## Channels, and who is allowed
 
