@@ -1788,11 +1788,13 @@ fn teardown(cfg: &Config, dir: &str, branch: &str, base: &str, dry_run: bool) {
     vars.insert("base".to_string(), base.to_string());
     vars.insert("repo".to_string(), dir.to_string());
     let cmd = util::render(cmd, &vars);
+    // Naming the branch, not the command: a teardown is usually a script, and
+    // its first line is `set -eu` for every branch alike.
     if dry_run {
-        println!("  would run teardown: {}", cmd.lines().next().unwrap_or("").trim());
+        println!("  would run teardown for {branch}");
         return;
     }
-    println!("  teardown: {}", cmd.lines().next().unwrap_or("").trim());
+    println!("  teardown for {branch}");
     if let Err(e) = util::shell_quiet(std::path::Path::new(dir), &cmd, &[]) {
         println!("  teardown failed for {branch}: {e}");
     }
