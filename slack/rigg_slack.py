@@ -39,7 +39,7 @@ HELP_GROUPS = [
         ("add <stack> <task>", "stack another branch on top of one"),
     ]),
     ("While it is running", [
-        ("say <stack> <message>", "a follow-up turn in that stack's session"),
+        ("say <stack> <message>", "a follow-up on that branch — add `+push` to send it to the PR"),
         ("stop <stack>", "cancel it — `cancel` works too"),
         ("continue <stack> +part", "take it further, e.g. `continue foo +copilot`"),
         ("retry <stack> [step]", "run the same thing again"),
@@ -497,13 +497,47 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
     stack = resolve(repo, prefix, short, say)
     if stack is None:
         return
+
+    # `say` is one turn, not a pipeline, so it takes none of the `+feature`
+    # words - but it does take --push, and wanting the change on the PR is the
+    # common enough case to be worth a word.
+    push = False
+    words = message.split()
+    while words and words[-1].lower() in ("+push", "and", "push"):
+        if words[-1].lower() in ("+push", "push"):
+            push = True
+        words.pop()
+    message = " ".join(words)
+    if not message:
+        say("`say <stack> <message>`")
+        return
+
     say(f"passing that to `{stack}`...")
     # A turn takes as long as it takes; the ack above is what keeps Slack happy.
-    code, out = run_rigg(
-        repo, ["say", stack, message] + image_args(images or []), timeout=3600
-    )
+    args = ["say", stack, message] + image_args(images or [])
+    if push:
+        args.append("--push")
+    code, out = run_rigg(repo, args, timeout=3600)
     tail = "\n".join(out.splitlines()[-25:])
-    say(f"{'done' if code == 0 else 'failed'} — `{stack}`\n```\n{tail[:2500]}\n```")
+    note = ""
+    if code == 0 and not push and dirty(repo, stack):
+        # Otherwise the change shows up in the preview, which hot-reloads from
+        # the checkout, while the PR silently does not have it.
+        note = ("\nThe change is in the branch but *not pushed* — say it again "
+                "with `+push` on the end to get it onto the PR.")
+    say(f"{'done' if code == 0 else 'failed'} — `{stack}`\n```\n{tail[:2500]}\n```{note}")
+
+
+def dirty(repo: Path, stack: str) -> bool:
+    """Whether a stack's checkout has uncommitted changes."""
+    code, path = run_rigg(repo, ["attach", "--path", stack])
+    if code != 0:
+        return False
+    out = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=path.strip(),
+        capture_output=True, text=True,
+    )
+    return bool(out.stdout.strip())
 
 
 def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None:

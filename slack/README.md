@@ -32,7 +32,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 
 | | |
 | --- | --- |
-| `say <stack> <message>` | a follow-up turn in that stack's session |
+| `say <stack> <message>` | a follow-up on that branch; end with `+push` to send it to the PR |
 | `stop <stack>` | cancel it (`cancel` also works) |
 | `continue <stack> +part` | take it further than it was started with |
 | `retry <stack> [step]` | run the same thing again |
@@ -53,6 +53,16 @@ review found, and hands back a URL to look at. Everything below is optional.
 | --- | --- |
 | `rm <stack>` | what removing it would do |
 | `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
+
+`say` continues the same branch and the agent's own session — use it for
+"also do X" on work already done. `add` starts the *next* branch on top, with
+its own PR, for something that should be reviewed separately.
+
+A `say` does not commit unless told: end it with `+push` and the turn is
+committed and pushed using your message as the subject. Without it, the reply
+says the change is in the branch but not on the PR, since the preview
+hot-reloads from the checkout and would otherwise show a change the PR does
+not have.
 
 ### Changing one run
 
