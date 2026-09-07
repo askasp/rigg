@@ -539,7 +539,16 @@ def find_stack(repo: Path, prefix: str, short: str) -> tuple[str | None, str | N
     if full in stacks:
         return full, None
     tails = {s: s.split("/", 1)[1] for s in stacks}
-    for test in (lambda t: t.startswith(short), lambda t: short in t):
+    # A fragment has to be long enough to be a name someone meant. Without
+    # this, the first word of a sentence matched: `say i want to change ...`
+    # took `i` for a stack, because `i` is inside `b2b-fixes-in-the-a07`, and
+    # a question was delivered to an unrelated branch as an instruction.
+    tests = []
+    if len(short) >= 3:
+        tests.append(lambda t: t.startswith(short))
+    if len(short) >= 5:
+        tests.append(lambda t: short in t)
+    for test in tests:
         hits = [s for s, t in tails.items() if test(t)]
         if len(hits) == 1:
             return hits[0], None
@@ -1418,6 +1427,17 @@ def main() -> int:
                 )
                 if in_thread:
                     rest = f"{in_thread.split('/', 1)[1]} {rest}".strip()
+                elif ask_session(channel.repo, event.get("thread_ts")) is not None and \
+                        ask_session(channel.repo, event.get("thread_ts")).exists():
+                    # This thread is a question, not a branch. Guessing a stack
+                    # from the first word of a sentence is how a question ends
+                    # up being carried out on an unrelated branch.
+                    say(
+                        f"This thread is a question, not a stack — `{verb}` needs "
+                        f"one. Name it (`{verb} <stack> …`), or drop the verb to "
+                        f"ask a follow-up here."
+                    )
+                    return
 
         def work():
             try:  # noqa: SIM105
