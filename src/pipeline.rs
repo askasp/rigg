@@ -12,6 +12,8 @@ pub struct Runner {
     pub cfg: Config,
     pub vars: BTreeMap<String, String>,
     pub dry_run: bool,
+    /// Resume this exact conversation rather than the checkout's most recent.
+    pub session: Option<String>,
     /// The id of the step last attempted, so a caller can record where the
     /// run got to without having to read its own log back.
     pub at: Option<String>,
@@ -29,6 +31,7 @@ impl Runner {
             cfg,
             vars,
             dry_run,
+            session: None,
             at: None,
         }
     }
@@ -120,7 +123,8 @@ impl Runner {
 
         // A one-shot invocation has no session of its own, so continuity comes
         // from the agent's resume flag; `clear` is what leaves it off.
-        let argv = headless::command_for(&acfg, &text, !step.clear);
+        let argv =
+            headless::command_for(&acfg, &text, !step.clear, self.session.as_deref());
         println!("  -> [{role}] {}", describe(&argv, &text));
         if self.dry_run {
             return Ok(());

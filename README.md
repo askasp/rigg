@@ -505,6 +505,10 @@ rigg ask "where is the revenue figure computed?"
 rigg ask --new "..."        # a fresh conversation rather than carrying one on
 ```
 
+It prints the conversation id it used, and `--session <id>` carries that exact
+one on. Without it, `--continue` resumes whichever conversation spoke last in
+the checkout — fine for one, wrong as soon as two are going at once.
+
 No branch, no worktree, no pipeline. It runs one turn in the repo you are in,
 with the agent put in a read-only mode - `--permission-mode plan` for claude -
 and its configured `args` dropped, since those exist to let it edit unattended

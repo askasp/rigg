@@ -802,8 +802,17 @@ def chunks(text: str, size: int) -> list[str]:
     return out or [text[:size]]
 
 
+def ask_session(repo: Path, thread_ts: str | None) -> Path | None:
+    """Where the conversation id for a Slack thread is kept."""
+    if not thread_ts:
+        return None
+    d = git_common_dir(repo) / "rigg" / "slack" / "ask"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{thread_ts}.id"
+
+
 def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
-            in_thread: bool = False) -> None:
+            thread_ts: str | None = None) -> None:
     """A question about the code: no branch, no worktree, nothing changed.
 
     A new message starts a fresh conversation and a reply inside its thread
@@ -813,17 +822,36 @@ def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
     if not rest:
         say("`ask <question>` — about the code; nothing is changed")
         return
+    # A thread is one conversation. Resuming it by id rather than by
+    # "whichever spoke last in this checkout" is what keeps two threads from
+    # answering each other's questions.
+    store = ask_session(repo, thread_ts)
+    prior = None
+    if store is not None:
+        try:
+            prior = store.read_text().strip() or None
+        except OSError:
+            prior = None
+
     args = ["ask", rest]
-    if not in_thread:
+    if prior:
+        args += ["--session", prior]
+    else:
         args.append("--new")
-    # Reading the code takes the better part of a minute, and until it answers
-    # there is nothing to say the question was even heard.
-    say("_reading the code…_" if not in_thread else "_carrying on…_")
+    say("_carrying on…_" if prior else "_reading the code…_")
     code, out = run_rigg(repo, args, timeout=1800)
+
+    # Record which conversation this became, so the next reply here finds it.
+    m = re.search(r"^session:\s*(\S+)", out, re.M)
+    if store is not None and m:
+        try:
+            store.write_text(m.group(1))
+        except OSError:
+            pass
     if code != 0:
         say(f"could not ask:\n```\n{out[-1500:]}\n```")
         return
-    text = agent_text(out)
+    text = re.sub(r"^session:.*$", "", agent_text(out), flags=re.M).strip()
     if not text:
         say(f"```\n{out[-1500:]}\n```")
         return
@@ -1376,8 +1404,10 @@ def main() -> int:
         def work():
             try:  # noqa: SIM105
                 if fn is cmd_ask:
+                    # The thread this lands in - its own ts when the question
+                    # starts one - is the conversation's identity.
                     fn(channel.repo, name, rest, reply, event["channel"],
-                       bool(event.get("thread_ts")))
+                       event.get("thread_ts") or event["ts"])
                 elif fn in (cmd_new, cmd_add, cmd_say):
                     fn(channel.repo, name, rest, reply, event["channel"],
                        pipeline, images)

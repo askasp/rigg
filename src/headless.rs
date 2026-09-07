@@ -11,7 +11,12 @@ use crate::config::AgentCfg;
 /// step that did not ask for a fresh context. Both `claude -p` and
 /// `opencode run` take `--continue`, and both start a new session instead of
 /// failing when there is nothing to continue.
-pub fn command_for(cfg: &AgentCfg, prompt: &str, continue_session: bool) -> Vec<String> {
+pub fn command_for(
+    cfg: &AgentCfg,
+    prompt: &str,
+    continue_session: bool,
+    session: Option<&str>,
+) -> Vec<String> {
     if let Some(template) = &cfg.command {
         let mut argv: Vec<String> = template
             .iter()
@@ -41,8 +46,19 @@ pub fn command_for(cfg: &AgentCfg, prompt: &str, continue_session: bool) -> Vec<
         // rigg.toml is how you say more than that.
         other => (vec![other.to_string()], false),
     };
-    if continue_session && resumable {
-        argv.push("--continue".into());
+    // A named session beats "the last one in this directory": two
+    // conversations in the same checkout would otherwise resume each other,
+    // and whichever spoke last would win.
+    match (session, resumable) {
+        (Some(id), true) => {
+            argv.push(match cfg.kind.as_str() {
+                "opencode" => "--session".into(),
+                _ => "--resume".to_string(),
+            });
+            argv.push(id.to_string());
+        }
+        _ if continue_session && resumable => argv.push("--continue".into()),
+        _ => {}
     }
     // Without something like `--permission-mode acceptEdits`, a headless agent
     // will describe the change it would make and edit nothing.

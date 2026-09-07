@@ -209,6 +209,11 @@ enum Cmd {
         /// Start a fresh conversation instead of carrying the last one on.
         #[arg(long)]
         new: bool,
+        /// Carry on this exact conversation. Without it, `--continue` resumes
+        /// whichever was last in the checkout - which is the wrong one as soon
+        /// as two are going at once.
+        #[arg(long)]
+        session: Option<String>,
         /// Agent role (default: the first one configured).
         #[arg(long)]
         agent: Option<String>,
@@ -683,7 +688,7 @@ fn real_main() -> Result<()> {
             }
         }
 
-        Cmd::Ask { question, new, agent } => {
+        Cmd::Ask { question, new, session, agent } => {
             let question = match question {
                 Some(q) => q,
                 None => ask("ask> ").context("nothing asked")?,
@@ -732,7 +737,14 @@ fn real_main() -> Result<()> {
                 )),
                 ..Default::default()
             };
-            pipeline::Runner::new(root.clone(), cfg, vars, false).run(&[step])?;
+            let mut runner = pipeline::Runner::new(root.clone(), cfg, vars, false);
+            runner.session = session;
+            runner.run(&[step])?;
+            // Which conversation this was, so a caller can come back to this
+            // one rather than to whatever spoke most recently here.
+            if let Some(id) = claude_last_session(&root.to_string_lossy()) {
+                println!("session: {id}");
+            }
         }
 
         Cmd::Stop { target } => {

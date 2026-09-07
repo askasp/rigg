@@ -50,8 +50,12 @@ no table of its own.
 
 A question is not a task, so `ask` makes no stack, no worktree and no PR — it
 answers in the main checkout with the agent in a read-only mode, and the
-checkout is untouched afterwards. A new message starts a fresh conversation; a
-reply inside its thread carries that one on, which is how Slack already reads.
+checkout is untouched afterwards.
+
+**A thread is a conversation.** A new message starts one; every reply inside
+its thread carries that same one on, and two threads never answer each other's
+questions — the conversation is resumed by id, not by "whichever spoke last in
+this checkout", which is what `--continue` alone would mean.
 
 **Have a look**
 
