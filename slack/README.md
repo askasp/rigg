@@ -53,7 +53,12 @@ answers in the main checkout with the agent in a read-only mode, and the
 checkout is untouched afterwards.
 
 **A thread is a conversation.** A new message starts one; every reply inside
-its thread carries that same one on, and two threads never answer each other's
+its thread carries that same one on — and once a thread is a conversation you
+can drop the verb, since `@rigg what about the fee?` in there can only mean
+the next question. The mention is still needed: Slack only tells the bot about
+messages that name it.
+
+A new message starts one; every reply inside its thread carries that same one on, and two threads never answer each other's
 questions — the conversation is resumed by id, not by "whichever spoke last in
 this checkout", which is what `--continue` alone would mean.
 

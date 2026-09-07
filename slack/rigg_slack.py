@@ -47,7 +47,7 @@ HELP_GROUPS = [
         ("retry <stack> [step]", "run the same thing again"),
     ]),
     ("Ask about the code", [
-        ("ask <question>", "no branch, nothing changed — reply in the thread to go on"),
+        ("ask <question>", "no branch, nothing changed; then `@rigg <more>` in its thread"),
     ]),
     ("Have a look", [
         ("stacks", "one message per stack — reply in one to talk to it"),
@@ -1351,12 +1351,30 @@ def main() -> int:
             )
             return
 
+        def in_thread_say(text: str, thread_ts: str | None = None):
+            """Answer in the thread the message came from."""
+            return say(text=text, thread_ts=thread_ts or event.get("thread_ts") or event["ts"])
+
         verb, rest = parse(event.get("text", ""))
         if verb == "help":
             say(help_for(channel))
             return
         fn = COMMANDS.get(verb)
         pipeline = None
+
+        # Inside a thread that is already a conversation, anything that is not
+        # a command is the next question. Retyping `ask` there says nothing the
+        # thread has not already said.
+        if fn is None:
+            store = ask_session(channel.repo, event.get("thread_ts"))
+            if store is not None and store.exists() and channel.may("ask") is None:
+                question = f"{verb} {rest}".strip()
+                pool.submit(
+                    lambda: cmd_ask(channel.repo, name, question, in_thread_say,
+                                    event["channel"], event.get("thread_ts"))
+                )
+                return
+
         if fn is None:
             # Not a command, so it may be a pipeline: `preview <task>` reads
             # better than a flag, and non-coders do not have to learn one.
