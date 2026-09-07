@@ -731,6 +731,9 @@ def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
     args = ["ask", rest]
     if not in_thread:
         args.append("--new")
+    # Reading the code takes the better part of a minute, and until it answers
+    # there is nothing to say the question was even heard.
+    say("_reading the code…_" if not in_thread else "_carrying on…_")
     code, out = run_rigg(repo, args, timeout=1800)
     if code != 0:
         say(f"could not ask:\n```\n{out[-1500:]}\n```")
@@ -897,8 +900,11 @@ def cmd_rm(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     if stack is None:
         return
     args = ["stack", "rm", stack]
-    if len(parts) > 1 and parts[1].lower() in ("yes", "y", "confirm"):
+    doing = len(parts) > 1 and parts[1].lower() in ("yes", "y", "confirm")
+    if doing:
         args.append("--yes")
+        # The teardown stops a dev stack and its tunnels, which is not quick.
+        say(f"_removing `{stack.split('/', 1)[-1]}` and stopping what it started…_")
     code, out = run_rigg(repo, args, timeout=600)
     say(f"```\n{out[:2500]}\n```" if out else "nothing to say")
 
