@@ -902,14 +902,13 @@ fn real_main() -> Result<()> {
             // not worth cutting. Here the branch already exists, so a run that
             // only reviews or previews it needs none - and one is asked for
             // only when a step would otherwise be handed an empty {{task}}.
-            if opts.task.is_none() && !fg && needs_a_task(&root, cli.config.as_deref(), &opts) {
-                if !std::io::stdin().is_terminal() {
-                    bail!(
-                        "a step in this pipeline wants a task and none was given: \
-                         `rigg adopt {branch} \"...\"`"
-                    );
+            if let Some(step) = task_step(&root, cli.config.as_deref(), &opts) {
+                if !fg && !std::io::stdin().is_terminal() {
+                    bail!("{}", no_task_for(&root, cli.config.as_deref(), &branch, &step));
                 }
-                opts.task = Some(ask("task> ")?);
+                if !fg {
+                    opts.task = Some(ask("task> ")?);
+                }
             }
             media::collect(&root, &branch, &images, !no_paste)?;
             let path = adopt_stack(
@@ -1743,18 +1742,18 @@ fn start_queued_add(
 /// Detached, that question reaches a closed stdin and the run dies a second
 /// after being started, leaving a pid file, no output and a log holding one
 /// baffling line. Worth catching while there is still a terminal to say it to.
-fn needs_a_task(root: &std::path::Path, cfg_path: Option<&str>, o: &RunOpts) -> bool {
+/// The first step of this run whose prompt would be handed an empty
+/// `{{task}}`, if any. Named rather than merely counted, because "something
+/// wants a task" is not enough to act on.
+fn task_step(root: &std::path::Path, cfg_path: Option<&str>, o: &RunOpts) -> Option<String> {
     if o.task.is_some() {
-        return false;
+        return None;
     }
-    let Ok(cfg) = Config::load(root, cfg_path) else {
-        return false;
-    };
-    let Ok(mut steps) = pipeline_steps(
+    let cfg = Config::load(root, cfg_path).ok()?;
+    let mut steps = pipeline_steps(
         &cfg, o.pipeline.as_deref(), &o.with_features, &o.without_features,
-    ) else {
-        return false;
-    };
+    )
+    .ok()?;
     if let Some(from) = &o.from {
         if let Some(i) = steps.iter().position(|s| &s.id == from) {
             steps = steps.split_off(i);
@@ -1763,12 +1762,39 @@ fn needs_a_task(root: &std::path::Path, cfg_path: Option<&str>, o: &RunOpts) -> 
     if !o.only.is_empty() {
         steps.retain(|s| o.only.contains(&s.id));
     }
-    steps.iter().any(|s| {
-        s.prompt_text(&cfg.dir)
-            .ok()
-            .flatten()
-            .is_some_and(|p| p.contains("{{task}}"))
-    })
+    steps
+        .iter()
+        .find(|s| {
+            s.prompt_text(&cfg.dir)
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.contains("{{task}}"))
+        })
+        .map(|s| s.id.clone())
+}
+
+fn needs_a_task(root: &std::path::Path, cfg_path: Option<&str>, o: &RunOpts) -> bool {
+    task_step(root, cfg_path, o).is_some()
+}
+
+/// Pipelines that would run this branch without wanting a task - the answer to
+/// "then what can I run?", which is otherwise a hunt through the config.
+fn taskless_pipelines(root: &std::path::Path, cfg_path: Option<&str>) -> Vec<String> {
+    let Ok(cfg) = Config::load(root, cfg_path) else {
+        return Vec::new();
+    };
+    cfg.pipelines
+        .keys()
+        .filter(|name| {
+            task_step(
+                root,
+                cfg_path,
+                &RunOpts { pipeline: Some((*name).clone()), ..Default::default() },
+            )
+            .is_none()
+        })
+        .cloned()
+        .collect()
 }
 
 /// The first step that would stop to ask something, if any.
@@ -2464,6 +2490,52 @@ fn adoptable(from: &std::path::Path, branch: &str) -> Result<(String, Option<Str
              is someone else's, or `rigg new {branch} \"...\"` to start it."
         ),
     }
+}
+
+/// How rigg is being addressed, for commands suggested back to whoever is
+/// reading them. A terminal types `rigg`; the Slack bridge sets this to
+/// `@rigg`, since a command line is no use in a message.
+fn addressed_as() -> String {
+    std::env::var("RIGG_ADDRESSED_AS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "rigg".into())
+}
+
+/// Why an `adopt` cannot run, and the two ways out of it.
+///
+/// "A step wants a task" is true and useless on its own: it names neither the
+/// step nor what to do instead. A branch that already exists is usually
+/// adopted to be looked at rather than worked on, so the pipelines that want
+/// nothing said to them are the likely answer and are listed.
+fn no_task_for(
+    root: &std::path::Path,
+    cfg_path: Option<&str>,
+    branch: &str,
+    step: &str,
+) -> String {
+    let me = addressed_as();
+    let mut out = format!(
+        "`{step}` is the step that hands the agent a task, and this run has \
+         none. `{branch}` already exists, so there is nothing for rigg to \
+         infer one from.\n\n\
+         Say what to do with it:\n  \
+         {me} adopt {branch} <what to do>\n"
+    );
+    let free = taskless_pipelines(root, cfg_path);
+    if free.is_empty() {
+        out.push_str(
+            "\nEvery pipeline here has a step that wants a task. One that only \
+             reviews or previews the branch would need none - see `rigg features` \
+             for the parts to leave out.",
+        );
+    } else {
+        out.push_str("\nOr run one that only looks at the branch as it stands:\n");
+        for name in &free {
+            out.push_str(&format!("  {me} {name} adopt {branch}\n"));
+        }
+    }
+    out
 }
 
 /// Take an existing branch into a stack: a worktree on the branch itself,

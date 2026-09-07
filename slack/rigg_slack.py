@@ -208,6 +208,9 @@ def run_rigg(repo: Path, args: list[str], timeout: int = 120) -> tuple[int, str]
             text=True,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
+            # A command line is no use in a message: anything rigg suggests
+            # back should be typable where it is being read.
+            env={**os.environ, "RIGG_ADDRESSED_AS": "@rigg"},
         )
     except subprocess.TimeoutExpired:
         return 1, f"`rigg {' '.join(args)}` timed out after {timeout}s"

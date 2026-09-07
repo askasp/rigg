@@ -217,7 +217,24 @@ branch.
 `new` always needs a task, because a branch with nothing to do is not worth
 cutting. Here the branch exists already, so a pipeline that only reviews or
 previews it is asked for none - the task is prompted for only when a step
-actually uses `{{task}}`.
+actually uses `{{task}}`. Where one is wanted and none was given, the refusal
+names the step that wants it and lists the pipelines that do not:
+
+```
+`implement` is the step that hands the agent a task, and this run has none.
+`fix/scope-fetches` already exists, so there is nothing for rigg to infer one
+from.
+
+Say what to do with it:
+  rigg adopt fix/scope-fetches <what to do>
+
+Or run one that only looks at the branch as it stands:
+  rigg preview adopt fix/scope-fetches
+  rigg review adopt fix/scope-fetches
+```
+
+Read in Slack those say `@rigg`, the bridge setting `RIGG_ADDRESSED_AS` - a
+command line is no use in a message.
 
 Because rigg did not make the branch, it does not delete it: `stack rm` gives
 the checkout back and leaves the branch alone, so only uncommitted work or a
