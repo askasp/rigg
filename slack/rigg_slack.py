@@ -39,13 +39,13 @@ HELP_GROUPS = [
         ("add <stack> <task>", "stack another branch on top of one"),
     ]),
     ("While it is running", [
-        ("say <stack> <message>", "a follow-up on that branch — add `+push` to send it to the PR"),
+        ("say <stack> <message>", "a follow-up on that branch; commits and pushes it"),
         ("stop <stack>", "cancel it — `cancel` works too"),
         ("continue <stack> +part", "take it further, e.g. `continue foo +copilot`"),
         ("retry <stack> [step]", "run the same thing again"),
     ]),
     ("Have a look", [
-        ("stacks", "this channel's stacks and how they are doing"),
+        ("stacks", "one message per stack — reply in one to talk to it"),
         ("logs <stack>", "the tail of a run's log"),
         ("urls <stack>", "links the run printed — previews, PRs"),
         ("parts", "the optional parts you can add"),
@@ -60,6 +60,7 @@ HELP_GROUPS = [
 # whole point is that `new <task>` on its own already does the sensible thing.
 MODIFIERS = [
     ("+copilot", "also wait for Copilot's review and apply it"),
+    ("-push", "on a `say`: change the branch without pushing"),
     ("-preview", "skip the running copy"),
     ("effort=high", "a heavier review — low, medium, high, max"),
     ("ai=opencode", "run it on a different agent"),
@@ -222,20 +223,33 @@ def git_common_dir(repo: Path) -> Path:
     return Path(out.stdout.strip())
 
 
-def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str) -> None:
-    """Record where a branch's progress should be reported.
+def remember_thread(repo: Path, branch: str, channel: str, thread_ts: str,
+                    primary: bool = True) -> None:
+    """Record a thread that belongs to a branch.
 
-    The notify hook reads this; keying by branch is what lets a detached run
-    find its way back to the thread that asked for it, long after this process
-    has forgotten the request.
+    `primary` is where a run reports: the notify hook reads `thread_ts`, which
+    is what lets a detached run find the thread that asked for it long after
+    this process has forgotten. Every thread is also kept in `threads`, so a
+    reply in any of them can be understood as being about this branch -
+    a status listing gives a stack a thread without that being where its runs
+    should suddenly start reporting.
     """
     d = git_common_dir(repo) / "rigg" / "slack"
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{branch.replace('/', '-')}.json").write_text(
-        # The branch is stored as well as being the filename, because the
-        # filename flattens its slash and cannot be turned back.
-        json.dumps({"channel": channel, "thread_ts": thread_ts, "branch": branch})
-    )
+    f = d / f"{branch.replace('/', '-')}.json"
+    try:
+        data = json.loads(f.read_text())
+    except (OSError, ValueError):
+        data = {}
+    # The branch is stored as well as being the filename, because the filename
+    # flattens its slash and cannot be turned back.
+    data["branch"] = branch
+    data["channel"] = channel
+    if primary or not data.get("thread_ts"):
+        data["thread_ts"] = thread_ts
+    threads = [t for t in data.get("threads", []) if t != thread_ts]
+    data["threads"] = (threads + [thread_ts])[-10:]
+    f.write_text(json.dumps(data))
 
 
 def stack_for_thread(repo: Path, channel: str, thread_ts: str | None) -> str | None:
@@ -254,7 +268,12 @@ def stack_for_thread(repo: Path, channel: str, thread_ts: str | None) -> str | N
             data = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        if data.get("channel") == channel and data.get("thread_ts") == thread_ts:
+        if data.get("channel") != channel:
+            continue
+        known = set(data.get("threads", []))
+        if data.get("thread_ts"):
+            known.add(data["thread_ts"])
+        if thread_ts in known:
             return data.get("branch") or f.stem
     return None
 
@@ -546,15 +565,20 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
     if stack is None:
         return
 
-    # `say` is one turn, not a pipeline, so it takes none of the `+feature`
-    # words - but it does take --push, and wanting the change on the PR is the
-    # common enough case to be worth a word.
-    push = False
+    # Pushed unless told otherwise: the containers mount the checkout, so a
+    # follow-up is live in the preview the moment it lands. Leaving the PR
+    # behind by default meant the visible thing and the reviewable thing
+    # quietly disagreed.
+    push = True
     words = message.split()
-    while words and words[-1].lower() in ("+push", "and", "push"):
-        if words[-1].lower() in ("+push", "push"):
+    while words and words[-1].lower() in (
+        "+push", "push", "-push", "nopush", "no-push", "and"
+    ):
+        w = words.pop().lower()
+        if w in ("-push", "nopush", "no-push"):
+            push = False
+        elif w in ("+push", "push"):
             push = True
-        words.pop()
     message = " ".join(words)
     if not message:
         say("`say <stack> <message>`")
@@ -578,8 +602,8 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
             listed = "\n".join(f"- {l}" for l in urls.splitlines())
             extras += f"\nThe preview has it already:\n{listed}"
         if not push and dirty(repo, stack):
-            extras += ("\n_Not pushed_ — say it again with `+push` on the end "
-                       "to get it onto the PR.")
+            extras += ("\n_Not pushed_ — the change is in the branch only. "
+                       "Say it again without `-push` to get it onto the PR.")
 
     say(f"{head}\n```\n{tail[:2000]}\n```{extras}")
 
@@ -768,12 +792,38 @@ def cmd_parts(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
 
 
 def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """One message per stack, so each gets a thread to be talked to in."""
     code, out = run_rigg(repo, ["stack", "list"])
     if code != 0:
         say(f"```\n{out[:2500]}\n```")
         return
     mine = filter_stack_list(out, prefix)
-    say(f"```\n{mine}\n```" if mine.strip() else "no stacks in this channel yet")
+    if not mine.strip():
+        say("no stacks in this channel yet — `new <task>` starts one")
+        return
+
+    # Split the listing back into a block per stack: a stack's name is the
+    # only unindented line, and its branches follow indented under it.
+    blocks: list[tuple[str, list[str]]] = []
+    for line in mine.splitlines():
+        if not line[:1].isspace() and line.strip():
+            blocks.append((line.strip(), []))
+        elif blocks and line.strip():
+            blocks[-1][1].append(line.strip())
+
+    say(f"*{len(blocks)} stack(s)* — reply in a message below to talk to that one.")
+    for name, branches in blocks:
+        short = name.split("/", 1)[1] if "/" in name else name
+        body = f"*{short}*\n```\n" + "\n".join(branches) + "\n```"
+        urls = preview_urls(repo, name)
+        if urls:
+            body += "\n" + "\n".join(f"- {l}" for l in urls.splitlines())
+        posted = say(body)
+        ts = posted.get("ts") if isinstance(posted, dict) else None
+        if ts:
+            # Not primary: a listing should give this stack somewhere to be
+            # replied to, without moving where its runs report.
+            remember_thread(repo, name, channel, ts, primary=False)
 
 
 def cmd_logs(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
@@ -798,6 +848,7 @@ COMMANDS = {
     "say": cmd_say,
     "stacks": cmd_stacks,
     "status": cmd_stacks,
+    "list": cmd_stacks,
     "logs": cmd_logs,
     "pipelines": cmd_pipelines,
     "parts": cmd_parts,

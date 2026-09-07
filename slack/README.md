@@ -32,7 +32,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 
 | | |
 | --- | --- |
-| `say <stack> <message>` | a follow-up on that branch; end with `+push` to send it to the PR |
+| `say <stack> <message>` | a follow-up on that branch — committed and pushed |
 | `stop <stack>` | cancel it (`cancel` also works) |
 | `continue <stack> +part` | take it further than it was started with |
 | `retry <stack> [step]` | run the same thing again |
@@ -41,7 +41,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 
 | | |
 | --- | --- |
-| `stacks` | this channel's stacks and how they are doing |
+| `stacks` | a message per stack, each with a thread to reply in (`list`, `status`) |
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
 | `parts` | the optional parts this repo has |
@@ -61,11 +61,11 @@ its own PR, for something that should be reviewed separately.
 When a `say` finishes, the reply says so and lists the preview URLs if one is
 up — the containers mount the checkout, so the change is already live there.
 
-A `say` does not commit unless told: end it with `+push` and the turn is
-committed and pushed using your message as the subject. Without it, the reply
-says the change is in the branch but not on the PR, since the preview
-hot-reloads from the checkout and would otherwise show a change the PR does
-not have.
+A `say` is committed and pushed, using your message as the commit subject.
+That is the default because the containers mount the checkout: a follow-up is
+live in the preview the moment it lands, so leaving the PR behind would mean
+the visible thing and the reviewable thing quietly disagree. End with `-push`
+to change the branch without pushing.
 
 ### Changing one run
 
@@ -92,10 +92,22 @@ Any unambiguous part of the name will do — `say in-b2b ...` reaches
 name, since the random suffix is not something to read back. An ambiguous
 fragment says what it matched.
 
-Better still, **reply in the stack's own thread and leave the name out**:
-`@rigg say make the bars blue` works there, because the thread is already
-where that branch reports. That applies to `add`, `say`, `stop`, `retry`,
+Better still, **leave the name out and reply in the stack's own thread**.
+`stacks` posts one message per stack for exactly this — reply under the one
+you mean:
+
+```
+@rigg say make the bars blue
+@rigg urls
+@rigg continue +copilot
+```
+
+That works in any thread belonging to a stack: the one `stacks` posted, or the
+one a run reports into. It applies to `add`, `say`, `stop`, `retry`,
 `continue`, `urls`, `logs` and `rm`.
+
+A listing gives a stack a thread to be addressed in without moving where its
+runs report — that stays wherever the run was started.
 
 ## Channels, and who is allowed
 
