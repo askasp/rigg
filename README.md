@@ -147,7 +147,9 @@ short pipeline can be given the rest later:
 rigg continue billing --pipeline full-preview
 ```
 
-A step that *failed* is picked up again; one that finished is stepped over. The
+A step that *failed* is picked up again; one that finished is stepped over.
+`--wait` queues it behind a run still in flight, which is when you usually
+notice something was left out. The
 step and the pipeline are recorded as the run goes, rather than read back out
 of the log, because a foreground run writes no log.
 

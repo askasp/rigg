@@ -34,7 +34,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 | --- | --- |
 | `say <stack> <message>` | a follow-up on that branch — committed and pushed |
 | `stop <stack>` | cancel it (`cancel` also works) |
-| `continue <stack> +part` | take it further than it was started with |
+| `continue <stack> +part` | take it further; queues if a run is still going |
 | `retry <stack> [step]` | run the same thing again |
 
 **Ask about the code**

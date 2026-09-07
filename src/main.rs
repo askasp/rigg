@@ -239,9 +239,16 @@ enum Cmd {
         /// Turn one off.
         #[arg(long = "without", value_name = "FEATURE")]
         without_features: Vec<String>,
+        /// Wait for the run in flight to finish, then carry on. Without it a
+        /// branch that is busy is simply refused.
+        #[arg(long)]
+        wait: bool,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
+        /// Internal: this process is the detached waiter.
+        #[arg(long, hide = true)]
+        worker: bool,
     },
     /// Stop a run that is still going.
     Stop {
@@ -598,14 +605,36 @@ fn real_main() -> Result<()> {
             }
         }
 
-        Cmd::Continue { target, pipeline, with_features, without_features, fg } => {
+        Cmd::Continue {
+            target, pipeline, with_features, without_features, wait, fg, worker,
+        } => {
             let st = Stacks::load(&root)?;
             let entry = match target {
                 Some(t) => resolve_target(&root, &st, &t)?,
                 None => pick_stack(&root, &st)?,
             };
             if let Some(pid) = running_pid(&root, &entry.branch) {
-                bail!("`{}` is still running (pid {pid})", entry.branch);
+                if !wait {
+                    bail!(
+                        "`{}` is still running (pid {pid}). Pass --wait to carry on \
+                         as soon as it finishes.",
+                        entry.branch
+                    );
+                }
+                if !worker {
+                    // Detach a waiter rather than holding this terminal - or,
+                    // from Slack, a worker thread - for the length of a run.
+                    queue_continue(
+                        &root, &entry.branch, pipeline.as_deref(),
+                        &with_features, &without_features,
+                    )?;
+                    return Ok(());
+                }
+                println!("waiting for `{}` to finish (pid {pid})...", entry.branch);
+                while running_pid(&root, &entry.branch).is_some() {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                println!("`{}` finished", entry.branch);
             }
             let dir = entry_path(&root, &entry)?;
             let dirp = std::path::Path::new(&dir);
@@ -1703,6 +1732,20 @@ fn start_detached(
         args.push("--task".into());
         args.push(t.clone());
     }
+    // Where to start was being dropped, so a detached `continue` worked out
+    // the right step and then ran the whole pipeline anyway.
+    if let Some(f) = &o.from {
+        args.push("--from".into());
+        args.push(f.clone());
+    }
+    for id in &o.only {
+        args.push("--only".into());
+        args.push(id.clone());
+    }
+    if let Some(b) = &o.base {
+        args.push("--base".into());
+        args.push(b.clone());
+    }
     for a in &o.agents {
         args.push("--agent".into());
         args.push(a.clone());
@@ -1816,6 +1859,57 @@ fn logged_pipeline(root: &std::path::Path, branch: &str) -> Option<String> {
     let (_, rest) = line.split_once("pipeline ")?;
     let name = rest.split(&[',', ' '][..]).next()?;
     (name != "steps").then(|| name.to_string())
+}
+
+/// Detach a process that waits for the run in flight, then continues.
+fn queue_continue(
+    root: &std::path::Path,
+    branch: &str,
+    pipeline: Option<&str>,
+    with: &[String],
+    without: &[String],
+) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> =
+        vec!["continue".into(), branch.into(), "--wait".into(), "--worker".into()];
+    if let Some(p) = pipeline {
+        args.push("--pipeline".into());
+        args.push(p.to_string());
+    }
+    for f in with {
+        args.push("--with".into());
+        args.push(f.clone());
+    }
+    for f in without {
+        args.push("--without".into());
+        args.push(f.clone());
+    }
+    let mut cmd = if which("setsid") {
+        let mut c = std::process::Command::new("setsid");
+        c.arg(&exe).args(&args);
+        c
+    } else {
+        let mut c = std::process::Command::new(&exe);
+        c.args(&args);
+        c
+    };
+    // Its own output cannot go to the branch log, which the run it starts
+    // truncates - but discarding it leaves a queued continuation with no
+    // account of what it decided or why it did nothing.
+    let note = step_path(root, branch)?.with_extension("continue.log");
+    if let Some(d) = note.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let out = std::fs::File::create(&note)?;
+    let errs = out.try_clone()?;
+    cmd.current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(errs)
+        .spawn()
+        .context("could not queue the continuation")?;
+    println!("queued: `{branch}` will carry on as soon as its run finishes");
+    Ok(())
 }
 
 /// Stop a detached run and everything it started.

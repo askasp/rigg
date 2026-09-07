@@ -968,7 +968,9 @@ def cmd_continue(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     stack = resolve(repo, prefix, parts[0], say)
     if stack is None:
         return
-    args = ["continue", stack]
+    # --wait: forgetting a part is something you notice while it is running,
+    # which is exactly when a refusal is least useful.
+    args = ["continue", stack, "--wait"]
     # `continue foo +copilot` is the usual shape now that parts replaced
     # pipeline names; a bare name still works where a repo has them.
     rest_after = " ".join(parts[1:])
