@@ -41,7 +41,7 @@ review found, and hands back a URL to look at. Everything below is optional.
 
 | | |
 | --- | --- |
-| `stacks` | a message per stack in the channel, each a thread to reply in (`list`, `status`) |
+| `stacks` | a name per stack in the channel; open one for its card (`list`, `status`) |
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
 | `parts` | the optional parts this repo has |
@@ -106,8 +106,10 @@ That works in any thread belonging to a stack: the one `stacks` posted, or the
 one a run reports into. It applies to `add`, `say`, `stop`, `retry`,
 `continue`, `urls`, `logs` and `rm`.
 
-A listing answers in the channel rather than in a thread, since it is what you
-look at to decide which thread to open — and each stack needs to be top-level
+A listing puts names in the channel and everything else - branches, state,
+preview URLs - one level down in each name's thread, so it stays glanceable
+however many stacks there are. It answers in the channel rather than in a
+thread, since it is what you look at to decide which thread to open — and each stack needs to be top-level
 to have a thread of its own. Everything else replies in the thread it was
 asked in.
 

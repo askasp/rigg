@@ -818,19 +818,24 @@ def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         elif blocks and line.strip():
             blocks[-1][1].append(line.strip())
 
-    say(f"*{len(blocks)} stack(s)* — reply in a message below to talk to that one.")
+    say(f"*{len(blocks)} stack(s)* — open one to see it or talk to it.")
     for name, branches in blocks:
         short = name.split("/", 1)[1] if "/" in name else name
-        body = f"*{short}*\n```\n" + "\n".join(branches) + "\n```"
+        # The channel carries names only. Everything else goes one level down,
+        # so a listing stays glanceable however many stacks there are.
+        posted = say(f"*{short}*")
+        ts = posted.get("ts") if isinstance(posted, dict) else None
+        if not ts:
+            continue
+        # Not primary: a listing should give this stack somewhere to be
+        # replied to, without moving where its runs report.
+        remember_thread(repo, name, channel, ts, primary=False)
+
+        card = list(branches)
         urls = preview_urls(repo, name)
         if urls:
-            body += "\n" + "\n".join(f"- {l}" for l in urls.splitlines())
-        posted = say(body)
-        ts = posted.get("ts") if isinstance(posted, dict) else None
-        if ts:
-            # Not primary: a listing should give this stack somewhere to be
-            # replied to, without moving where its runs report.
-            remember_thread(repo, name, channel, ts, primary=False)
+            card += [""] + urls.splitlines()
+        say("```\n" + "\n".join(card) + "\n```", thread_ts=ts)
 
 
 def cmd_logs(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
@@ -1061,10 +1066,13 @@ def main() -> int:
             reply_ts = event.get("thread_ts") or event["ts"]
             say(text=f"got {len(images)} image(s)", thread_ts=reply_ts)
 
-        def reply(text: str):
+        def reply(text: str, thread_ts: str | None = None):
             # Threading keeps a channel with several stacks in flight
             # readable; a listing is the exception, being the thing you look
-            # at to decide which thread to open.
+            # at to decide which thread to open. `thread_ts` lets a listing
+            # put the detail under the title it just posted.
+            if thread_ts:
+                return say(text=text, thread_ts=thread_ts)
             if verb in CHANNEL_LEVEL:
                 return say(text=text)
             return say(text=text, thread_ts=event.get("thread_ts") or event["ts"])
