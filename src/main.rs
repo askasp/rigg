@@ -1476,6 +1476,39 @@ fn start_queued_add(
     Ok(())
 }
 
+/// Whether this run would stop to ask for a task it has not been given.
+///
+/// Detached, that question reaches a closed stdin and the run dies a second
+/// after being started, leaving a pid file, no output and a log holding one
+/// baffling line. Worth catching while there is still a terminal to say it to.
+fn needs_a_task(root: &std::path::Path, cfg_path: Option<&str>, o: &RunOpts) -> bool {
+    if o.task.is_some() {
+        return false;
+    }
+    let Ok(cfg) = Config::load(root, cfg_path) else {
+        return false;
+    };
+    let Ok(mut steps) = pipeline_steps(
+        &cfg, o.pipeline.as_deref(), &o.with_features, &o.without_features,
+    ) else {
+        return false;
+    };
+    if let Some(from) = &o.from {
+        if let Some(i) = steps.iter().position(|s| &s.id == from) {
+            steps = steps.split_off(i);
+        }
+    }
+    if !o.only.is_empty() {
+        steps.retain(|s| o.only.contains(&s.id));
+    }
+    steps.iter().any(|s| {
+        s.prompt_text(&cfg.dir)
+            .ok()
+            .flatten()
+            .is_some_and(|p| p.contains("{{task}}"))
+    })
+}
+
 /// The first step that would stop to ask something, if any.
 fn confirm_step(
     root: &std::path::Path,
@@ -1501,6 +1534,13 @@ fn start_detached(
         bail!(
             "step `{id}` asks for confirmation, which a detached run cannot do. \
              Run it with --fg, or drop `confirm` from that step."
+        );
+    }
+    if needs_a_task(dir, None, &o) {
+        bail!(
+            "this run starts at a step that needs a task, and none was given. \
+             Pass --task \"...\", or --from a later step to pick up after the \
+             work is done."
         );
     }
     let log = log_path(root, branch)?;
