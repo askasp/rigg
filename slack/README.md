@@ -112,11 +112,12 @@ That works in any thread belonging to a stack: the one `stacks` posted, or the
 one a run reports into. It applies to `add`, `say`, `stop`, `retry`,
 `continue`, `urls`, `logs` and `rm`.
 
-A listing first clears any stack in this channel whose every branch has landed
+A listing leaves out any stack in this channel whose every branch has landed
 on the trunk — a merged stack is finished with, and the next piece of work
-wants a new one. Each is removed through its own teardown, so a merged branch
-stops holding a dev stack and its tunnels. A stack with a run in flight is
-never touched.
+wants a new one. It names them as going and removes them behind you: each goes
+through its own teardown, which stops a dev stack and its tunnels and takes
+tens of seconds, so waiting for it would make a listing something you avoid
+running. A stack with a run in flight is never touched.
 
 A listing puts names in the channel and everything else - branches, state,
 preview URLs - one level down in each name's thread, so it stays glanceable

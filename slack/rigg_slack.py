@@ -23,6 +23,7 @@ import subprocess
 import sys
 import traceback
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import tomllib
@@ -935,21 +936,42 @@ def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
             blocks[-1][1].append(line.strip())
 
     # A stack whose every branch has landed is finished with: the next piece
-    # of work wants a new one, not this. Clearing them here keeps the listing
-    # about what is live, and runs each stack's teardown on the way out so a
-    # merged branch stops holding a dev stack and its tunnels.
-    live, gone = [], []
+    # of work wants a new one, not this.
+    # Deciding is a few git ancestry checks; removing means stopping a dev
+    # stack and its tunnels, tens of seconds each - so the listing says which
+    # are going, shows what is live, and lets the removal happen behind it.
+    live, merged = [], []
     for name, branches in blocks:
         heads = [branch_state(b)[0] for b in branches]
         running = any("running" in branch_state(b)[1] for b in branches)
         if heads and not running and all(merged_into_trunk(repo, h) for h in heads):
-            code, _ = run_rigg(repo, ["stack", "rm", name, "--yes"], timeout=600)
-            (gone if code == 0 else live).append(name if code == 0 else (name, branches))
+            merged.append(name)
         else:
             live.append((name, branches))
-    if gone:
-        merged = ", ".join(f"`{g.split('/', 1)[-1]}`" for g in gone)
-        say(f"_Cleared {len(gone)} merged stack(s): {merged}_")
+
+    if merged:
+        listed = ", ".join(f"`{m.split('/', 1)[-1]}`" for m in merged)
+        say(f"_Clearing {len(merged)} merged stack(s): {listed}_")
+
+        def clear():
+            failed = []
+            for name in merged:
+                code, out = run_rigg(repo, ["stack", "rm", name, "--yes"], timeout=900)
+                if code != 0:
+                    failed.append((name, out))
+            if failed:
+                lines = "\n".join(
+                    f"`{n.split('/', 1)[-1]}`: {o.strip().splitlines()[-1][:120]}"
+                    for n, o in failed
+                )
+                say(f"_could not clear:_\n{lines}")
+            else:
+                say(f"_cleared {len(merged)} merged stack(s)_")
+
+        # Daemon: if the bridge goes away mid-teardown the worst case is a
+        # tunnel left running, which the next listing clears.
+        threading.Thread(target=clear, daemon=True).start()
+
     blocks = live
     if not blocks:
         say("nothing live in this channel — `new <task>` starts something")
