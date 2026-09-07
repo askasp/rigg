@@ -703,6 +703,91 @@ def agent_text(out: str) -> str:
     return "\n".join(keep).strip()
 
 
+# Shortcodes do not render inside a code block, where the tables end up, so
+# the common marks become characters that do.
+CELL_MARKS = {
+    ":white_check_mark:": "yes", ":heavy_check_mark:": "yes", ":+1:": "yes",
+    ":x:": "no", ":negative_squared_cross_mark:": "no", ":no_entry:": "no",
+    ":warning:": "!",
+}
+
+
+def plain_cell(cell: str) -> str:
+    """One table cell, with what a code block cannot render taken out."""
+    for code, mark in CELL_MARKS.items():
+        cell = cell.replace(code, mark)
+    cell = re.sub(r"\*\*(.+?)\*\*", r"\1", cell)
+    cell = re.sub(r"__(.+?)__", r"\1", cell)
+    return cell.strip()
+
+
+def to_slack(text: str) -> str:
+    """Turn an agent's Markdown into what Slack actually renders.
+
+    Slack's mrkdwn is not Markdown: no headings, no tables, and bold is one
+    asterisk rather than two. Left alone, a good answer arrives as literal
+    `##` and a wall of pipes.
+    """
+    out: list[str] = []
+    fenced = False
+    table: list[str] = []
+
+    def flush_table() -> None:
+        # Slack has no tables, so lay the columns out by hand in a code block.
+        # Markup does not render in there, which is why the cells are stripped
+        # of it rather than left showing literal asterisks.
+        if not table:
+            return
+        rows = []
+        for r in table:
+            if re.fullmatch(r"\s*\|[\s|:-]+\|\s*", r):
+                continue  # the |---|---| rule
+            cells = [c.strip() for c in r.strip().strip("|").split("|")]
+            rows.append([plain_cell(c) for c in cells])
+        table.clear()
+        if not rows:
+            return
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        pads = [max(len(r[i]) for r in rows) for i in range(width)]
+        laid = [
+            "  ".join(c.ljust(p) for c, p in zip(row, pads)).rstrip()
+            for row in rows
+        ]
+        out.append("```\n" + "\n".join(laid) + "\n```")
+
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            flush_table()
+            fenced = not fenced
+            # A language tag renders as part of the block in Slack.
+            out.append("```")
+            continue
+        if fenced:
+            out.append(line)
+            continue
+
+        if line.strip().startswith("|") and line.strip().endswith("|"):
+            table.append(line)
+            continue
+        flush_table()
+
+        # Headings become a bold line; Slack has no heading of its own.
+        h = re.match(r"^\s*#{1,6}\s+(.*)$", line)
+        if h:
+            out.append(f"*{h.group(1).strip().rstrip('#').strip()}*")
+            continue
+
+        line = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"<\2|\1>", line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"*\1*", line)
+        line = re.sub(r"__(.+?)__", r"*\1*", line)
+        line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+        out.append(line)
+
+    flush_table()
+    return "\n".join(out)
+
+
 def chunks(text: str, size: int) -> list[str]:
     """Split for Slack, on paragraph then line breaks rather than mid-word."""
     out, cur = [], ""
@@ -742,7 +827,7 @@ def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
     if not text:
         say(f"```\n{out[-1500:]}\n```")
         return
-    for part in chunks(text, 3500):
+    for part in chunks(to_slack(text), 3500):
         say(part)
 
 
@@ -771,7 +856,7 @@ def cmd_summary(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         return
     # A real summary runs past Slack's per-message limit, and truncating it
     # loses the end - which is where "what is left" lives.
-    for part in chunks(text, 3500):
+    for part in chunks(to_slack(text), 3500):
         say(part)
 
 

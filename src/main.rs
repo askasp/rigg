@@ -725,7 +725,10 @@ fn real_main() -> Result<()> {
                 clear: new,
                 prompt: Some(format!(
                     "Answer this question about the code. Do not change any files, \
-                     and do not commit anything - this is a question.\n\n{question}"
+                     and do not commit anything - this is a question.\n\n\
+                     The answer is read in Slack, which renders neither Markdown \
+                     headings nor tables: prefer short paragraphs and bullets, and \
+                     cite code as path:line.\n\n{question}"
                 )),
                 ..Default::default()
             };

@@ -43,6 +43,11 @@ review found, and hands back a URL to look at. Everything below is optional.
 | --- | --- |
 | `ask <question>` | answered from the repo; no branch, nothing changed (`q`) |
 
+An answer is rewritten into what Slack actually renders: `##` headings become
+bold lines, `**bold**` becomes `*bold*`, links become Slack links, and a
+Markdown table is laid out as aligned columns in a code block, since Slack has
+no table of its own.
+
 A question is not a task, so `ask` makes no stack, no worktree and no PR — it
 answers in the main checkout with the agent in a read-only mode, and the
 checkout is untouched afterwards. A new message starts a fresh conversation; a
