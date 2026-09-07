@@ -129,6 +129,8 @@ class Channel:
 
 class Config:
     def __init__(self, path: Path):
+        self.path = path
+        self.mtime = path.stat().st_mtime
         with path.open("rb") as fh:
             raw = tomllib.load(fh)
         self.channels: dict[str, Channel] = {
@@ -137,6 +139,32 @@ class Config:
         for name, ch in self.channels.items():
             if not (ch.repo / ".git").exists():
                 raise SystemExit(f"channel #{name}: {ch.repo} is not a git repository")
+
+    def reload_if_changed(self) -> "Config":
+        """Pick up an edited channels.toml without a restart.
+
+        A channel still has to be mapped before it can do anything - that
+        mapping is what says which repo it drives, and an unmapped channel
+        doing nothing is the point of it. Making that cost a restart, though,
+        was only friction.
+        """
+        try:
+            if self.path.stat().st_mtime == self.mtime:
+                return self
+            fresh = Config(self.path)
+        # SystemExit is not an Exception, and Config raises it for a repo that
+        # is not there - which is exactly the typo this must survive.
+        except (Exception, SystemExit) as e:
+            # Keep serving the last good config rather than dying on a typo.
+            print(f"channels.toml not reloaded: {e}")
+            try:
+                self.mtime = self.path.stat().st_mtime
+            except OSError:
+                pass
+            return self
+        print(f"channels.toml reloaded - {len(fresh.channels)} channel(s): "
+              f"{', '.join('#' + n for n in fresh.channels)}")
+        return fresh
 
 
 # --------------------------------------------------------------------------
@@ -563,13 +591,21 @@ def main() -> int:
         return names[channel_id]
 
     def handle(event, client, say):
+        nonlocal cfg
         user = event.get("user")
         if not user or event.get("bot_id"):
             return
+        cfg = cfg.reload_if_changed()
         name = channel_name(client, event["channel"])
         channel = cfg.channels.get(name) if name else None
         if channel is None:
-            say(f"#{name} is not mapped to a repo in {cfg_path.name}")
+            mapped = ", ".join(f"#{n}" for n in cfg.channels) or "none"
+            say(
+                f"#{name} is not mapped to a repo. A channel has to be listed "
+                f"in `{cfg_path.name}` before I will do anything in it — that "
+                f"mapping is what says which repo it drives. Mapped now: "
+                f"{mapped}."
+            )
             return
 
         verb, rest = parse(event.get("text", ""))
