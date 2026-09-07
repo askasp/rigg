@@ -41,6 +41,7 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `logs <stack>` | the tail of a run's log |
 | `urls <stack>` | links the run printed — previews, PRs |
 | `pipelines` | what this repo offers |
+| `parts` | the optional parts, and which pipelines turn each on |
 
 **When it has landed**
 

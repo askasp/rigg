@@ -21,6 +21,7 @@ _rigg() {
     'status:Show branch and stack state'
     'stop:Stop a run that is still going'
     'pipelines:List the pipeline names'
+    'features:Show the optional parts of the pipeline'
     'doctor:Check the environment'
     'stack:Manage stacks'
     'init:Write a starter rigg.toml'

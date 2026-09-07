@@ -48,6 +48,7 @@ HELP_GROUPS = [
         ("logs <stack>", "the tail of a run's log"),
         ("urls <stack>", "links the run printed — previews, PRs"),
         ("pipelines", "what this repo offers"),
+        ("parts", "optional parts you can add with `+name`"),
     ]),
     ("When it has landed", [
         ("rm <stack>", "what removing it would do"),
@@ -566,6 +567,20 @@ def cmd_rm(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     say(f"```\n{out[:2500]}\n```" if out else "nothing to say")
 
 
+def cmd_parts(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
+    """The optional parts, so `+preview` is discoverable rather than folklore."""
+    code, out = run_rigg(repo, ["features"])
+    if code != 0 or not out.strip():
+        say(f"```\n{out[:2000] or 'no optional parts'}\n```")
+        return
+    # The first line tells a terminal user about --with; in here the way to
+    # change one is `+name`, so that line is replaced rather than shown.
+    body = "\n".join(out.splitlines()[1:]).strip("\n")
+    say(f"```\n{body[:2500]}\n```\n"
+        f"Add `+name` or `-name` to the end of a task to change one — "
+        f"`redo the payment screen +preview`.")
+
+
 def cmd_stacks(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     code, out = run_rigg(repo, ["stack", "list"])
     if code != 0:
@@ -594,6 +609,8 @@ COMMANDS = {
     "status": cmd_stacks,
     "logs": cmd_logs,
     "pipelines": cmd_pipelines,
+    "parts": cmd_parts,
+    "features": cmd_parts,
     "help": None,  # answered in dispatch, which knows the channel
     "stop": cmd_stop,
     "cancel": cmd_stop,

@@ -206,6 +206,8 @@ enum Cmd {
     Status,
     /// Print the pipeline names, one per line.
     Pipelines,
+    /// Show the optional parts, what each contains, and who turns it on.
+    Features,
     /// Stop a run that is still going.
     Stop {
         /// Stack or branch. Omit to choose.
@@ -431,6 +433,57 @@ fn real_main() -> Result<()> {
         }
 
         Cmd::Doctor => doctor(&root, cli.config.as_deref())?,
+
+        Cmd::Features => {
+            let cfg = Config::load(&root, cli.config.as_deref())?;
+            if cfg.features.is_empty() {
+                println!("no optional parts; every step always runs");
+                return Ok(());
+            }
+            // Every step in the file, wherever it is written, so a part shows
+            // its members whether the config is one list or a chain.
+            let all: Vec<&config::Step> = cfg
+                .steps
+                .iter()
+                .chain(cfg.pipelines.values().flat_map(|p| p.steps.iter()))
+                .collect();
+            println!("optional parts        rigg run --with <name> / --without <name>\n");
+            for (name, on) in &cfg.features {
+                let members: Vec<&str> = all
+                    .iter()
+                    .filter(|s| s.feature.as_deref() == Some(name.as_str()))
+                    .map(|s| s.id.as_str())
+                    .collect();
+                println!(
+                    "  {:<12} {:<4} {}",
+                    name,
+                    if *on { "on" } else { "off" },
+                    if members.is_empty() {
+                        "(no steps use it)".to_string()
+                    } else {
+                        members.join(", ")
+                    }
+                );
+                // Which names flip it, so the listing answers "how do I get
+                // this" and not only "what is it".
+                for want in [true, false] {
+                    let names: Vec<&str> = cfg
+                        .pipelines
+                        .iter()
+                        .filter(|(_, p)| p.features.get(name) == Some(&want))
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    if !names.is_empty() && want != *on {
+                        println!(
+                            "  {:<12} {:<4} {} in: {}",
+                            "", "",
+                            if want { "on" } else { "off" },
+                            names.join(", ")
+                        );
+                    }
+                }
+            }
+        }
 
         Cmd::Pipelines => {
             let cfg = Config::load(&root, cli.config.as_deref())?;

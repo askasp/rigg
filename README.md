@@ -322,6 +322,17 @@ features = { preview = true, copilot = false }
 vars = { effort = "high" }        # a name can mean a heavier review too
 ```
 
+`rigg features` lists them, what each contains, and which names turn it on:
+
+```
+optional parts        rigg run --with <name> / --without <name>
+
+  copilot      on   wait-copilot, fetch-review, apply-copilot-review, label-preview
+                    off in: preview, quick
+  preview      off  preview-up, preview-url
+                    on in: full-preview, preview, thorough
+```
+
 This is what keeps variants from multiplying. Three optional parts pre-declared
 would be eight pipelines; tagged, they are three tags plus whatever names are
 worth typing, and a fourth part changes none of them. A `feature` that no
