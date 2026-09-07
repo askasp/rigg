@@ -49,6 +49,10 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `rm <stack>` | what removing it would do |
 | `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
 
+End a task with `with opencode` (or `on codex`, `using claude`) to run it on a
+different agent — `claude`, `opencode`, `codex` and `gemini` are recognised
+there, and nothing else is, so "make it work with caching" stays a task.
+
 Stacks are referred to by their short name — `add proration-e4f "..."`, not the
 full `billing/proration-e4f`.
 

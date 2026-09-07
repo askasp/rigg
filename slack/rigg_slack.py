@@ -86,6 +86,9 @@ def help_for(channel: "Channel") -> str:
         lines += [f"`{c.ljust(width)}`  {d}" for c, d in rows]
 
     lines.append(
+        "\nEnd a task with `with opencode` to run it on another agent."
+    )
+    lines.append(
         "\nStacks here are named `%s/<slug>` and belong to this channel — "
         "refer to them by the short name, and other channels cannot see them."
         % channel.name
@@ -271,6 +274,29 @@ def download_images(event: dict, token: str) -> tuple[list[str], str | None]:
     return paths, tmp
 
 
+# Only these are stripped off the end of a task, so "make it work with caching"
+# stays a task rather than becoming a request to run on an agent called
+# `caching`.
+AGENT_KINDS = {"claude", "opencode", "codex", "gemini"}
+
+
+def split_agent(text: str) -> tuple[str, str | None]:
+    """Peel a trailing `with opencode` / `on opencode` off a task.
+
+    A word reads better than a flag for the same reason `preview` does, and
+    putting it last keeps the task the thing you type first.
+    """
+    words = text.split()
+    if len(words) >= 3 and words[-2].lower() in ("with", "on", "using") \
+            and words[-1].lower() in AGENT_KINDS:
+        return " ".join(words[:-2]), words[-1].lower()
+    return text, None
+
+
+def agent_args(kind: str | None) -> list[str]:
+    return ["--agent", kind] if kind else []
+
+
 def image_args(images: list[str]) -> list[str]:
     """rigg flags for attached images.
 
@@ -344,8 +370,9 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
     if not rest and not images:
         say("give me a task: `new <task>`")
         return
+    rest, kind = split_agent(rest)
     stack = f"{prefix}/{slug(rest or 'from an image')}"
-    args = ["new", stack, rest] + image_args(images)
+    args = ["new", stack, rest] + image_args(images) + agent_args(kind)
     if pipeline:
         args += ["--pipeline", pipeline]
     code, out = run_rigg(repo, args)
@@ -377,7 +404,10 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str,
     stack = resolve(repo, prefix, short, say)
     if stack is None:
         return
-    code, out = run_rigg(repo, ["add", stack, task] + image_args(images or []))
+    task, kind = split_agent(task)
+    code, out = run_rigg(
+        repo, ["add", stack, task] + image_args(images or []) + agent_args(kind)
+    )
     if code != 0:
         say(f"could not extend `{stack}`:\n```\n{out[:2500]}\n```")
         return

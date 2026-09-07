@@ -376,6 +376,23 @@ command = ["my-agent", "--print", "{{prompt}}"]
 A `command` is used verbatim — rigg adds no continue flag to it, so put one in
 the template if the tool has one.
 
+## Running on another agent
+
+A role carries a `kind` and the `args` for it as a matched set, so `--agent`
+swaps both:
+
+```sh
+rigg run --agent opencode                # every role
+rigg run --agent reviewer=opencode       # just that one - a second opinion
+rigg new billing "..." --agent opencode
+```
+
+`args` and `command` are dropped when the kind changes, and it says so. They
+have to be: claude takes `--permission-mode`, opencode has no such flag and
+takes `-m/--model` instead, so carrying them across would produce an agent that
+cannot start. A role you switch often is better written out twice in the config,
+with the right flags on each.
+
 ## Reporting progress
 
 ```toml
