@@ -519,13 +519,37 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
         args.append("--push")
     code, out = run_rigg(repo, args, timeout=3600)
     tail = "\n".join(out.splitlines()[-25:])
-    note = ""
-    if code == 0 and not push and dirty(repo, stack):
-        # Otherwise the change shows up in the preview, which hot-reloads from
-        # the checkout, while the PR silently does not have it.
-        note = ("\nThe change is in the branch but *not pushed* — say it again "
-                "with `+push` on the end to get it onto the PR.")
-    say(f"{'done' if code == 0 else 'failed'} — `{stack}`\n```\n{tail[:2500]}\n```{note}")
+    head = f"*{'Done' if code == 0 else 'Failed'}* — `{stack}`"
+
+    extras = ""
+    if code == 0:
+        # The containers mount the checkout, so the preview already has this
+        # change; saying where to look beats leaving it to be remembered.
+        urls = preview_urls(repo, stack)
+        if urls:
+            listed = "\n".join(f"- {l}" for l in urls.splitlines())
+            extras += f"\nThe preview has it already:\n{listed}"
+        if not push and dirty(repo, stack):
+            extras += ("\n_Not pushed_ — say it again with `+push` on the end "
+                       "to get it onto the PR.")
+
+    say(f"{head}\n```\n{tail[:2000]}\n```{extras}")
+
+
+def preview_urls(repo: Path, stack: str) -> str | None:
+    """The URLs a preview is currently serving for this branch, if any.
+
+    A repo that puts a preview up records them where its own teardown looks;
+    reading them back is what lets a finished turn say "and here is where to
+    look" rather than leaving that to be remembered.
+    """
+    d = git_common_dir(repo) / "rigg" / "preview" / stack.replace("/", "-")
+    f = d / "urls.txt"
+    try:
+        text = f.read_text().strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def dirty(repo: Path, stack: str) -> bool:

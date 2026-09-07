@@ -58,6 +58,9 @@ review found, and hands back a URL to look at. Everything below is optional.
 "also do X" on work already done. `add` starts the *next* branch on top, with
 its own PR, for something that should be reviewed separately.
 
+When a `say` finishes, the reply says so and lists the preview URLs if one is
+up — the containers mount the checkout, so the change is already live there.
+
 A `say` does not commit unless told: end it with `+push` and the turn is
 committed and pushed using your message as the subject. Without it, the reply
 says the change is in the branch but not on the PR, since the preview
