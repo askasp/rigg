@@ -86,8 +86,9 @@ def help_for(channel: "Channel") -> str:
         lines += [f"`{c.ljust(width)}`  {d}" for c, d in rows]
 
     lines.append(
-        "\nEnd a task with `with opencode` to use another agent, or "
-        "`effort=high` to set a prompt setting. Both together is fine."
+        "\nAdd to the end of a task, in any order: `+preview` / `-copilot` to "
+        "turn a part on or off, `effort=high` to set a prompt setting, "
+        "`with opencode` to use another agent."
     )
     lines.append(
         "\nStacks here are named `%s/<slug>` and belong to this channel — "
@@ -318,14 +319,36 @@ def var_args(vars: list[str]) -> list[str]:
     return out
 
 
-def split_modifiers(text: str) -> tuple[str, list[str]]:
-    """Strip `effort=high` and `with opencode` off the end, in either order."""
+def split_features(text: str) -> tuple[str, list[str]]:
+    """Peel trailing `+preview` / `-copilot` off a task.
+
+    `+x` rather than `with x`, because `with` already means the agent and a
+    task should not have to be read twice to work out which.
+    """
+    words = text.split()
     args: list[str] = []
-    for _ in range(2):
+    while len(words) > 1 and re.fullmatch(r"[+-][a-zA-Z][\w-]*", words[-1]):
+        w = words.pop()
+        args = ["--with" if w[0] == "+" else "--without", w[1:]] + args
+    return " ".join(words), args
+
+
+def split_modifiers(text: str) -> tuple[str, list[str]]:
+    """Strip `+preview`, `effort=high` and `with opencode` off the end.
+
+    In any order, and repeatedly, so nobody has to remember one.
+    """
+    args: list[str] = []
+    changed = True
+    while changed:
+        before = text
         text, kind = split_agent(text)
         args += agent_args(kind)
         text, found = split_vars(text)
         args += var_args(found)
+        text, feats = split_features(text)
+        args += feats
+        changed = text != before
     return text, args
 
 
@@ -472,7 +495,7 @@ def cmd_pipelines(repo: Path, prefix: str, rest: str, say, channel: str) -> None
     if not names:
         say("no pipelines configured in this repo")
         return
-    lines = "\n".join(f"• `{n}` — `{n.split('-')[-1] if '-' in n else n} <task>`" for n in names)
+    lines = "\n".join(f"• `{short_alias(n, names)} <task>`" for n in names)
     say(f"pipelines here:\n{lines}\n\n`new <task>` runs the default one.")
 
 

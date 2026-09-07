@@ -28,6 +28,12 @@ pub struct Config {
     /// against {{effort}} still work when nobody passes one.
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+    /// Optional parts of the pipeline, and whether each is on by default.
+    /// A step tagged `feature = "preview"` runs only when `preview` resolves
+    /// true. Listing them here in one table is what makes the defaults
+    /// something you can read rather than infer.
+    #[serde(default)]
+    pub features: BTreeMap<String, bool>,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
@@ -52,6 +58,15 @@ pub struct Pipeline {
     /// say what it drops, rather than either repeating the other.
     #[serde(default)]
     pub without: Vec<String>,
+    /// Which features this pipeline turns on or off, over the `[features]`
+    /// defaults. This is how a named pipeline becomes an alias for a
+    /// combination rather than a copy of one.
+    #[serde(default)]
+    pub features: BTreeMap<String, bool>,
+    /// Placeholder values this pipeline sets, over the top-level `[vars]`.
+    /// So a `thorough` alias can mean a heavier review as well as more steps.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -112,6 +127,10 @@ pub struct Step {
     /// Start a fresh session instead of resuming the previous step's.
     #[serde(default)]
     pub clear: bool,
+    /// This step belongs to an optional feature and runs only when it is on.
+    /// Unset means the step always runs.
+    #[serde(default)]
+    pub feature: Option<String>,
     /// Only run when changed files match one of these globs.
     #[serde(default)]
     pub when_changed: Option<Vec<String>>,
@@ -253,6 +272,10 @@ impl Config {
 
         let mut steps = match &p.extends {
             Some(parent) => self.resolve_pipeline(parent, seen)?,
+            // A pipeline that adds no steps of its own and extends nothing is
+            // a name for a set of features, so it starts from the top-level
+            // steps. That is what lets an alias be two lines.
+            None if p.steps.is_empty() => self.steps.clone(),
             None => Vec::new(),
         };
 
@@ -300,6 +323,49 @@ impl Config {
     }
 
 
+    /// Which features are on: the defaults, then the pipeline's own choices,
+    /// then whatever this run asked for.
+    pub fn features_for(
+        &self,
+        pipeline: Option<&str>,
+        with: &[String],
+        without: &[String],
+    ) -> Result<BTreeMap<String, bool>> {
+        let mut on = self.features.clone();
+        let name = pipeline.or(self.default_pipeline.as_deref());
+        if let Some(p) = name.and_then(|n| self.pipelines.get(n)) {
+            for (k, v) in &p.features {
+                on.insert(k.clone(), *v);
+            }
+        }
+        for (list, value) in [(with, true), (without, false)] {
+            for f in list {
+                if !on.contains_key(f) {
+                    let known: Vec<&str> = on.keys().map(|s| s.as_str()).collect();
+                    bail!(
+                        "no feature `{f}`; this config has {}",
+                        if known.is_empty() { "none".into() } else { known.join(", ") }
+                    );
+                }
+                on.insert(f.clone(), value);
+            }
+        }
+        Ok(on)
+    }
+
+    /// Placeholder values: the defaults, then the pipeline's own.
+    /// `--var` is applied by the caller on top of these.
+    pub fn vars_for(&self, pipeline: Option<&str>) -> BTreeMap<String, String> {
+        let mut vars = self.vars.clone();
+        let name = pipeline.or(self.default_pipeline.as_deref());
+        if let Some(p) = name.and_then(|n| self.pipelines.get(n)) {
+            for (k, v) in &p.vars {
+                vars.insert(k.clone(), v.clone());
+            }
+        }
+        vars
+    }
+
     fn validate(&self) -> Result<()> {
         // Resolve every pipeline now, so a broken `extends` is a config error
         // rather than a surprise the first time that pipeline is chosen.
@@ -315,6 +381,24 @@ impl Config {
                 );
             }
         }
+        // A feature named nowhere in [features] is a typo that would silently
+        // drop a step, so it is worth refusing up front.
+        let all_features = self
+            .steps
+            .iter()
+            .chain(self.pipelines.values().flat_map(|p| p.steps.iter()))
+            .filter_map(|s| s.feature.clone())
+            .chain(self.pipelines.values().flat_map(|p| p.features.keys().cloned()));
+        for f in all_features {
+            if !self.features.contains_key(&f) {
+                let known: Vec<&str> = self.features.keys().map(|s| s.as_str()).collect();
+                bail!(
+                    "feature `{f}` is used but not declared in [features]; declared: {}",
+                    if known.is_empty() { "none".into() } else { known.join(", ") }
+                );
+            }
+        }
+
         let all = self
             .steps
             .iter()

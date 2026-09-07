@@ -49,7 +49,9 @@ channel is allowed to use, with the repo's own pipeline names filled in.
 | `rm <stack>` | what removing it would do |
 | `rm <stack> yes` | actually remove it, running the repo's `teardown` first |
 
-End a task with `effort=high` to set a prompt placeholder — several are fine,
+End a task with `+preview` or `-copilot` to turn an optional part on or off.
+
+End it with `effort=high` to set a prompt placeholder — several are fine,
 and they are only taken off the end, so "set FOO=bar in the config" stays a
 task.
 

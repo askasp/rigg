@@ -60,6 +60,12 @@ enum Cmd {
         /// {{effort}}. Repeatable; overrides [vars] in the config.
         #[arg(long = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
+        /// Turn an optional part of the pipeline on for this run.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn one off for this run.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -90,6 +96,12 @@ enum Cmd {
         /// {{effort}}. Repeatable; overrides [vars] in the config.
         #[arg(long = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
+        /// Turn an optional part of the pipeline on for this run.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn one off for this run.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
         /// Run in this terminal instead of detaching.
         #[arg(long)]
         fg: bool,
@@ -165,6 +177,12 @@ enum Cmd {
         /// {{effort}}. Repeatable; overrides [vars] in the config.
         #[arg(long = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
+        /// Turn an optional part of the pipeline on for this run.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn one off for this run.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
         /// Run in the background and return, as `new` and `add` do.
         #[arg(long)]
         detach: bool,
@@ -471,10 +489,14 @@ fn real_main() -> Result<()> {
             dry_run,
             agents,
             vars,
+            with_features,
+            without_features,
             detach,
         } => {
-            let opts =
-                RunOpts { pipeline, task, base, from, only, dry_run, agents, vars };
+            let opts = RunOpts {
+                pipeline, task, base, from, only, dry_run, agents, vars,
+                with_features, without_features,
+            };
             if detach {
                 let branch = util::current_branch(&root)?;
                 start_detached(&root, &root, &branch, opts)?;
@@ -507,6 +529,8 @@ fn real_main() -> Result<()> {
             no_paste,
             agents,
             vars,
+            with_features,
+            without_features,
             fg,
         } => {
             let _ = &name;
@@ -527,8 +551,10 @@ fn real_main() -> Result<()> {
             // The branch a new stack starts is named after the stack itself.
             media::collect(&root, &name, &images, !no_paste)?;
             let path = push_stack(&root, cli.config.as_deref(), &name, base, None, true)?;
-            let opts =
-                RunOpts { pipeline, task: prompt, agents, vars, ..Default::default() };
+            let opts = RunOpts {
+                pipeline, task: prompt, agents, vars, with_features, without_features,
+                ..Default::default()
+            };
             if fg {
                 execute(&path, None, opts)?;
             } else {
@@ -545,6 +571,8 @@ fn real_main() -> Result<()> {
             no_paste,
             agents,
             vars,
+            with_features,
+            without_features,
             fg,
             worker,
         } => {
@@ -581,7 +609,7 @@ fn real_main() -> Result<()> {
             if !fg && !worker {
                 start_queued_add(
                     &root, &stack, &branch, prompt.as_deref(), pipeline.as_deref(),
-                    &agents, &vars,
+                    &agents, &vars, &with_features, &without_features,
                 )?;
                 return Ok(());
             }
@@ -647,7 +675,10 @@ fn real_main() -> Result<()> {
             execute(
                 std::path::Path::new(&path),
                 None,
-                RunOpts { pipeline, task: prompt, agents, vars, ..Default::default() },
+                RunOpts {
+                    pipeline, task: prompt, agents, vars, with_features,
+                    without_features, ..Default::default()
+                },
             )?;
         }
 
@@ -1177,6 +1208,8 @@ fn start_queued_add(
     pipeline: Option<&str>,
     agents: &[String],
     vars: &[String],
+    with_features: &[String],
+    without_features: &[String],
 ) -> Result<()> {
     if let Some(id) = confirm_step(root, None, pipeline) {
         bail!(
@@ -1228,6 +1261,14 @@ fn start_queued_add(
     for v in vars {
         args.push("--var".into());
         args.push(v.clone());
+    }
+    for f in with_features {
+        args.push("--with".into());
+        args.push(f.clone());
+    }
+    for f in without_features {
+        args.push("--without".into());
+        args.push(f.clone());
     }
     let mut cmd = if which("setsid") {
         let mut c = std::process::Command::new("setsid");
@@ -1314,6 +1355,14 @@ fn start_detached(
     for v in &o.vars {
         args.push("--var".into());
         args.push(v.clone());
+    }
+    for f in &o.with_features {
+        args.push("--with".into());
+        args.push(f.clone());
+    }
+    for f in &o.without_features {
+        args.push("--without".into());
+        args.push(f.clone());
     }
     // setsid detaches from this terminal's session, so the run survives the
     // shell going away.
@@ -1540,6 +1589,8 @@ struct RunOpts {
     dry_run: bool,
     agents: Vec<String>,
     vars: Vec<String>,
+    with_features: Vec<String>,
+    without_features: Vec<String>,
 }
 
 /// Load the config, pick the pipeline and run it against `root`.
@@ -1554,6 +1605,16 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         .unwrap_or_else(|| cfg.stack.trunk.clone());
 
     let mut steps = cfg.steps_for(o.pipeline.as_deref())?;
+    let features =
+        cfg.features_for(o.pipeline.as_deref(), &o.with_features, &o.without_features)?;
+    let off: Vec<&str> = features
+        .iter()
+        .filter(|(_, on)| !**on)
+        .map(|(f, _)| f.as_str())
+        .collect();
+    if !off.is_empty() {
+        steps.retain(|s| s.feature.as_deref().is_none_or(|f| !off.contains(&f)));
+    }
     if steps.is_empty() {
         bail!("pipeline has no steps");
     }
@@ -1597,7 +1658,7 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
 
     // Config defaults first, then this run's overrides, then the built-ins -
     // which win, so `[vars] branch = ...` cannot shadow the real branch.
-    let mut vars = cfg.vars.clone();
+    let mut vars = cfg.vars_for(o.pipeline.as_deref());
     for v in &o.vars {
         let (k, val) = v
             .split_once('=')

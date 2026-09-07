@@ -293,6 +293,41 @@ run = "./dev.sh quick -d"
 sitting between `push-and-pr` and `wait-copilot` — placement matters when the
 step it would otherwise follow waits 20 minutes for a review.
 
+### Optional parts
+
+The other way to vary a pipeline, and the one that scales: tag the steps that
+are not always wanted, and let a name mean a combination.
+
+```toml
+[features]
+pr = true         # on unless something says otherwise
+preview = false   # opt in
+copilot = true
+
+[[steps]]
+id = "preview-up"
+feature = "preview"     # runs only when `preview` is on
+```
+
+```sh
+rigg run --with preview --without copilot
+```
+
+A named pipeline that adds no steps of its own is then an alias for a
+combination, and inherits the top-level `[[steps]]`:
+
+```toml
+[pipelines.preview]
+features = { preview = true, copilot = false }
+vars = { effort = "high" }        # a name can mean a heavier review too
+```
+
+This is what keeps variants from multiplying. Three optional parts pre-declared
+would be eight pipelines; tagged, they are three tags plus whatever names are
+worth typing, and a fourth part changes none of them. A `feature` that no
+`[features]` declares is a config error, since a typo would otherwise silently
+drop a step.
+
 `without` drops inherited steps by id, which is what lets the fuller pipeline
 be the one written down and the shorter one say what it leaves out:
 
