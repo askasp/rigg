@@ -1915,6 +1915,7 @@ fn start_detached(
 /// `args` and `command` go with it, because both are written for the binary
 /// being replaced - claude takes `--permission-mode`, opencode does not take
 /// it at all, so carrying them over would produce an agent that cannot start.
+/// What the new kind cannot work without, it gets: see `default_args`.
 fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
     for spec in specs {
         let (roles, kind): (Vec<String>, &str) = match spec.split_once('=') {
@@ -1936,17 +1937,34 @@ fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
                 continue;
             }
             let dropped = !a.args.is_empty() || a.command.is_some();
+            let gained = default_args(kind);
             println!(
-                "  role `{role}`: {} -> {kind}{}",
+                "  role `{role}`: {} -> {kind}{}{}",
                 a.kind,
-                if dropped { ", dropping args written for it" } else { "" }
+                if dropped { ", dropping args written for it" } else { "" },
+                if gained.is_empty() { String::new() } else { format!(", using {}", gained.join(" ")) }
             );
             a.kind = kind.to_string();
-            a.args.clear();
+            a.args = default_args(kind);
             a.command = None;
         }
     }
     Ok(())
+}
+
+/// What a kind needs to edit anything, for a role that was just swapped onto it.
+///
+/// A swap arrives with no args, and claude with no permission mode does not
+/// fail: it describes the change, writes nothing, and exits 0. The step is
+/// reported ok and the run dies three steps later at `git push`, saying the
+/// branch has no commits - which is true, and not the reason.
+fn default_args(kind: &str) -> Vec<String> {
+    match kind {
+        // bypassPermissions rather than acceptEdits: a pipeline's own steps
+        // commit, and acceptEdits allows file edits only.
+        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
+        _ => Vec::new(),
+    }
 }
 
 /// A pipeline's steps with the parts that are switched off removed.
