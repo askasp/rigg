@@ -1960,9 +1960,10 @@ fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
 /// branch has no commits - which is true, and not the reason.
 fn default_args(kind: &str) -> Vec<String> {
     match kind {
-        // bypassPermissions rather than acceptEdits: a pipeline's own steps
-        // commit, and acceptEdits allows file edits only.
-        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
+        // auto, not acceptEdits: a pipeline's own steps commit and push, and
+        // acceptEdits allows file edits only. Not bypassPermissions either -
+        // auto does all three unattended without waiving the rest.
+        "claude" => vec!["--permission-mode".into(), "auto".into()],
         _ => Vec::new(),
     }
 }

@@ -576,7 +576,7 @@ cannot start. A role you switch often is better written out twice in the config,
 with the right flags on each.
 
 What the new kind cannot work without, it gets: a role swapped onto claude is
-given `--permission-mode bypassPermissions`, because claude without one does
+given `--permission-mode auto`, because claude without one does
 not fail — it describes the change, writes nothing and exits 0, so the step is
 reported ok and the run dies later at `git push` with a branch that has no
 commits.
