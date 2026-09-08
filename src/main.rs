@@ -1901,6 +1901,9 @@ fn start_detached(
     };
     let child = cmd
         .current_dir(dir)
+        // So every step of the detached run, and anything those spawn, see a
+        // PWD that agrees with the directory they are actually in.
+        .env("PWD", dir)
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(errs)

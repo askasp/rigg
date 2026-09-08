@@ -89,6 +89,12 @@ pub fn run(dir: &Path, argv: &[String]) -> Result<()> {
     // stdin before warning and giving up on it.
     let status = Command::new(bin)
         .current_dir(dir)
+        // current_dir moves the process, but not the PWD it inherited, and
+        // opencode reads PWD rather than asking the OS. A run started by the
+        // Slack bridge would otherwise look for the repo's files in whatever
+        // directory the bridge itself was started from, find none, and report
+        // the step ok having changed nothing.
+        .env("PWD", dir)
         .args(args)
         .stdin(Stdio::null())
         .status()
@@ -105,6 +111,7 @@ fn run_streaming(dir: &Path, bin: &str, args: &[String]) -> Result<()> {
 
     let mut child = Command::new(bin)
         .current_dir(dir)
+        .env("PWD", dir)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
