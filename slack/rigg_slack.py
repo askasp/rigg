@@ -463,6 +463,16 @@ def split_modifiers(text: str, keep: int = 1) -> tuple[str, list[str]]:
     return text, args
 
 
+def agent_only(mods: list[str]) -> list[str]:
+    """Just the agent choice out of a modifier list.
+
+    `ask` has no features to turn on and no placeholders to fill, so `+preview`
+    or `effort=high` on the end of a question is a typo rather than a setting.
+    """
+    return [a for i, m in enumerate(mods) if m == "--agent"
+            for a in ("--agent", mods[i + 1])]
+
+
 def image_args(images: list[str]) -> list[str]:
     """rigg flags for attached images.
 
@@ -923,6 +933,9 @@ def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
     # A thread is one conversation. Resuming it by id rather than by
     # "whichever spoke last in this checkout" is what keeps two threads from
     # answering each other's questions.
+    # `ai=opencode` on the end of a question, the same as on a task. rigg
+    # takes a kind here as well as a role, so both spellings reach an agent.
+    rest, mods = split_modifiers(rest)
     store = ask_session(repo, thread_ts)
     prior = None
     if store is not None:
@@ -931,7 +944,7 @@ def cmd_ask(repo: Path, prefix: str, rest: str, say, channel: str,
         except OSError:
             prior = None
 
-    args = ["ask", rest]
+    args = ["ask", rest] + agent_only(mods)
     if prior:
         args += ["--session", prior]
     else:
@@ -999,6 +1012,9 @@ def cmd_stop(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
 
 def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
     """Run the pipeline again on a branch, optionally from a named step."""
+    # A retry is a run, so it takes what a task takes - the agent above all,
+    # since retrying on the other one is half the reason to retry at all.
+    rest, mods = split_modifiers(rest, keep=1)
     parts = rest.split()
     if not parts:
         say("`retry <stack> [step]` — which one?")
@@ -1020,6 +1036,7 @@ def cmd_retry(repo: Path, prefix: str, rest: str, say, channel: str) -> None:
         args += ["--pipeline", pipeline]
     if len(parts) > 1:
         args += ["--from", parts[1]]
+    args += mods
     code, out = run_rigg(Path(dir_out.strip()), args)
     posted = say(f"```\n{out[:1500]}\n```" if out else
                  ("restarted" if code == 0 else "failed"))

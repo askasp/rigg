@@ -58,6 +58,10 @@ removes the branch itself - rigg did not make it.
 | --- | --- |
 | `ask <question>` | answered from the repo; no branch, nothing changed (`q`) |
 
+A question takes `ai=opencode` on the end like a task does, and `retry` takes
+everything a task does. `say` and `summary` do not: they carry on the session
+the branch already has, and that session belongs to the agent that ran it.
+
 An answer is rewritten into what Slack actually renders: `##` headings become
 bold lines, `**bold**` becomes `*bold*`, links become Slack links, and a
 Markdown table is laid out as aligned columns in a code block, since Slack has

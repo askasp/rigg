@@ -258,7 +258,7 @@ enum Cmd {
         /// as two are going at once.
         #[arg(long)]
         session: Option<String>,
-        /// Agent role (default: the first one configured).
+        /// Agent role, kind, or `role=kind` (default: the first role configured).
         #[arg(long)]
         agent: Option<String>,
     },
@@ -767,10 +767,8 @@ fn real_main() -> Result<()> {
                 None => ask("ask> ").context("nothing asked")?,
             };
             let mut cfg = Config::load(&root, cli.config.as_deref())?;
-            let role = match agent {
-                Some(r) => r,
-                None => cfg.agents.keys().next().cloned().context("no agents configured")?,
-            };
+            let role = agent_role(&mut cfg, agent)?;
+            let role_for_session = role.clone();
             let acfg = cfg
                 .agents
                 .get_mut(&role)
@@ -788,6 +786,9 @@ fn real_main() -> Result<()> {
             } else {
                 acfg.args = match acfg.kind.as_str() {
                     "claude" => vec!["--permission-mode".into(), "plan".into()],
+                    // opencode's own read-only agent. Without it the only thing
+                    // stopping an ask from editing is the prompt saying not to.
+                    "opencode" => vec!["--agent".into(), "plan".into()],
                     _ => Vec::new(),
                 };
             }
@@ -810,13 +811,21 @@ fn real_main() -> Result<()> {
                 )),
                 ..Default::default()
             };
+            let kind = cfg.agents[&role_for_session].kind.clone();
             let mut runner = pipeline::Runner::new(root.clone(), cfg, vars, false);
             runner.session = session;
             runner.run(&[step])?;
             // Which conversation this was, so a caller can come back to this
             // one rather than to whatever spoke most recently here.
-            if let Some(id) = claude_last_session(&root.to_string_lossy()) {
-                println!("session: {id}");
+            //
+            // Only for claude: the id is read out of claude's own history, so
+            // after a turn on another agent it names some earlier claude
+            // conversation. A caller that stored that - the Slack bridge stores
+            // it per thread - would resume a conversation from another thread.
+            if kind == "claude" {
+                if let Some(id) = claude_last_session(&root.to_string_lossy()) {
+                    println!("session: {id}");
+                }
             }
         }
 
@@ -1966,6 +1975,30 @@ fn default_args(kind: &str) -> Vec<String> {
         "claude" => vec!["--permission-mode".into(), "auto".into()],
         _ => Vec::new(),
     }
+}
+
+/// The role an `--agent` value names, for a command that runs a single turn.
+///
+/// It takes every spelling `run --agent` takes - a role, a kind, or `role=kind`
+/// - because in Slack they arrive as the same `ai=`, and being told that
+/// `opencode` is not a role is not an answer anybody wants.
+fn agent_role(cfg: &mut Config, spec: Option<String>) -> Result<String> {
+    let default = cfg
+        .agents
+        .keys()
+        .next()
+        .cloned()
+        .context("no agents configured")?;
+    let Some(spec) = spec else { return Ok(default) };
+    if cfg.agents.contains_key(&spec) {
+        return Ok(spec);
+    }
+    // Not a role, so a kind: swap the role that would have answered, rather
+    // than every role, since only one of them is about to run.
+    let spec = if spec.contains('=') { spec } else { format!("{default}={spec}") };
+    let role = spec.split('=').next().unwrap_or(&default).to_string();
+    override_agents(cfg, &[spec])?;
+    Ok(role)
 }
 
 /// A pipeline's steps with the parts that are switched off removed.
