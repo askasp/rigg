@@ -2327,6 +2327,7 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     }
     // Read off before the config is handed to the runner.
     let push_when_done = cfg.stack.push_when_done;
+    let trunk = cfg.stack.trunk.clone();
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run);
     let mut outcome = runner.run(&steps);
 
@@ -2342,7 +2343,31 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         let dirty = util::git(root, &["status", "--porcelain"])
             .map(|o| !o.trim().is_empty())
             .unwrap_or(false);
-        if dirty {
+        
+        // Check if there are commits to push even when the working directory is clean.
+        // This happens when the run committed changes but they haven't been pushed yet.
+        let has_commits_to_push = if !dirty {
+            let remote = util::git(root, &["remote"]).map(|o| o.trim().to_string()).unwrap_or_default();
+            if remote.is_empty() {
+                false
+            } else {
+                let base_ref = format!("{}/{}", remote, trunk);
+                let merge_base = util::git(root, &["merge-base", &base_ref, &branch])
+                    .map(|o| o.trim().to_string())
+                    .unwrap_or_default();
+                if merge_base.is_empty() {
+                    false
+                } else {
+                    util::git(root, &["rev-list", "--count", &format!("{merge_base}..{branch}")])
+                        .map(|o| o.trim().parse::<usize>().unwrap_or(0) > 0)
+                        .unwrap_or(false)
+                }
+            }
+        } else {
+            false
+        };
+        
+        if dirty || has_commits_to_push {
             // The task names what the run was for; where there is none - a
             // `continue` that only applies a review - the step that left the
             // work names it better than anything else available.
@@ -2654,6 +2679,43 @@ fn adopt_stack(
 fn push_changes(dir: &std::path::Path, branch: &str, message: &str) -> Result<()> {
     let changed = util::git(dir, &["status", "--porcelain"])?;
     if changed.trim().is_empty() {
+        // No uncommitted changes, but check if the branch is ahead of the base
+        // and needs to be pushed.
+        let remote = util::git(dir, &["remote"]).map(|o| o.trim().to_string()).unwrap_or_default();
+        if remote.is_empty() {
+            println!("no remote to push to; committed on {branch}");
+            return Ok(());
+        }
+        
+        // Check if branch is ahead of the base (main or the stack base).
+        // Use 'git merge-base' to find the common ancestor, then count commits
+        // that are on the branch but not on the base.
+        let base = util::git(dir, &["rev-parse", "--abbrev-ref", "HEAD@{u}"])
+            .map(|o| o.trim().to_string())
+            .ok()
+            .and_then(|up| up.split('/').last().map(|b| b.to_string()))
+            .unwrap_or_else(|| "main".to_string());
+        
+        let merge_base = util::git(dir, &["merge-base", &base, branch])
+            .map(|o| o.trim().to_string())
+            .unwrap_or_default();
+        
+        if merge_base.is_empty() {
+            println!("no remote to push to; committed on {branch}");
+            return Ok(());
+        }
+        
+        let count = util::git(dir, &["rev-list", "--count", &format!("{merge_base}..{branch}")])
+            .map(|o| o.trim().parse::<usize>().unwrap_or(0))
+            .unwrap_or(0);
+        
+        if count > 0 {
+            println!("pushing {count} commit(s)");
+            util::git(dir, &["push", "-u", "origin", branch])?;
+            println!("pushed {branch}");
+            return Ok(());
+        }
+        
         println!("nothing changed, so nothing to push");
         return Ok(());
     }
