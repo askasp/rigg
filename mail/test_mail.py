@@ -245,4 +245,39 @@ try:
 except Exception as e:
     check("an unsigned draft is refused", "unsigned" in str(e))
 
+# --- a dropped connection is retried, not fatal ------------------------------
+
+import requests  # noqa: E402
+
+
+class FlakySession:
+    """Drops the first two connections, then answers."""
+
+    def __init__(self):
+        self.headers = {}
+        self.calls = 0
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        if self.calls <= 2:
+            raise requests.ConnectionError("Remote end closed connection")
+
+        class R:
+            status_code = 200
+            ok = True
+            headers = {}
+
+            def json(self):
+                return {"_results": [{"id": "ok"}]}
+
+        return R()
+
+
+f = sync.Front.__new__(sync.Front)
+f.s = FlakySession()
+sync.time.sleep = lambda *_: None
+check("a dropped connection is retried rather than fatal",
+      f.get("https://example/x")["_results"][0]["id"] == "ok" and f.s.calls == 3,
+      f"{f.s.calls} calls")
+
 print(f"\n{ok} checks passed")

@@ -168,7 +168,16 @@ class Front:
         unattended instead of dying two thousand conversations in.
         """
         for attempt in range(6):
-            r = self.s.get(url, params=params, timeout=60)
+            try:
+                r = self.s.get(url, params=params, timeout=60)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # Front drops a connection now and then. A scheduled backfill
+                # that dies of it has walked two thousand conversations for
+                # nothing, so a dropped socket is retried like a 5xx.
+                if attempt == 5:
+                    raise SystemExit(f"gave up on {url}: {e}") from e
+                time.sleep(2 ** attempt)
+                continue
             if r.status_code == 429:
                 time.sleep(float(r.headers.get("retry-after", 10)) + 0.5)
                 continue
@@ -182,7 +191,7 @@ class Front:
                 reset = float(r.headers.get("x-ratelimit-reset", 0))
                 time.sleep(max(0.0, reset - time.time()) + 0.5)
             return r.json()
-        raise SystemExit(f"gave up on {url} after repeated rate limiting")
+        raise SystemExit(f"gave up on {url} after repeated retries")
 
     def paged(self, path: str, params: dict | None = None):
         url = self.BASE + path
