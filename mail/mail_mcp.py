@@ -101,6 +101,15 @@ def front_get(path: str) -> dict:
     return r.json()
 
 
+EMAIL_CHANNELS = frozenset(
+    # Front names the transport, not the medium, so every way of putting an
+    # address on a mailbox is its own type. Guessing at this list is how a
+    # draft fails on a working inbox: a `gmail` channel is email, and testing
+    # for "smtp" said it was not.
+    {"smtp", "imap", "gmail", "office365", "office365_shared", "exchange"}
+)
+
+
 def email_channel_for(conversation_id: str) -> str:
     """The channel a reply on this conversation should go out on.
 
@@ -115,10 +124,19 @@ def email_channel_for(conversation_id: str) -> str:
         raise ToolError(
             f"no inbox recorded for {conversation_id}; run the sync before drafting"
         )
-    for ch in front_get(f"/inboxes/{row['inbox_id']}/channels").get("_results", []):
-        if ch.get("types") == "smtp" or ch.get("type") in ("smtp", "email"):
+    channels = front_get(f"/inboxes/{row['inbox_id']}/channels").get("_results", [])
+    usable = [c for c in channels if c.get("is_valid", True)]
+    for ch in usable:
+        if ch.get("type") in EMAIL_CHANNELS:
             return ch["id"]
-    raise ToolError(f"inbox {row['inbox_id']} has no email channel to send from")
+    # A transport this list has not met yet, but which clearly sends mail.
+    for ch in usable:
+        if "@" in str(ch.get("address") or ""):
+            return ch["id"]
+    saw = ", ".join(sorted({str(c.get("type")) for c in channels})) or "none at all"
+    raise ToolError(
+        f"inbox {row['inbox_id']} has no channel that sends email - it has {saw}"
+    )
 
 
 def create_draft(conversation_id: str, body: str, author_id: str | None = None) -> dict:

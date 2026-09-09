@@ -306,4 +306,37 @@ check("a dropped connection is retried rather than fatal",
       f.get("https://example/x")["_results"][0]["id"] == "ok" and f.s.calls == 3,
       f"{f.s.calls} calls")
 
+# --- which channel a draft goes out on --------------------------------------
+
+db.execute("INSERT OR REPLACE INTO conversation_inbox VALUES(?,?,?)",
+           ("c-draft", "inb_x", "Some inbox"))
+db.commit()
+
+CHANNELS = {"_results": []}
+M.front_get = lambda path: CHANNELS
+M.DB = db
+
+def channel_is(types, expect, label):
+    CHANNELS["_results"] = types
+    try:
+        got = M.email_channel_for("c-draft")
+    except Exception as e:
+        got = f"error: {e}"
+    check(label, got == expect, f"got {got}")
+
+channel_is([{"id": "cha_1", "type": "gmail", "address": "a@b.no"}], "cha_1",
+           "a gmail channel is email - the type is the transport, not the medium")
+channel_is([{"id": "cha_1", "type": "smtp", "address": "a@b.no"}], "cha_1",
+           "so is smtp")
+channel_is([{"id": "cha_1", "type": "office365", "address": "a@b.no"}], "cha_1",
+           "so is office365")
+channel_is([{"id": "cha_1", "type": "twilio", "address": "+4712345678"},
+            {"id": "cha_2", "type": "gmail", "address": "a@b.no"}], "cha_2",
+           "an SMS channel is not picked over an email one")
+channel_is([{"id": "cha_1", "type": "something-new", "address": "a@b.no"}], "cha_1",
+           "a transport this list has not met still counts if it has an address")
+channel_is([{"id": "cha_1", "type": "gmail", "address": "a@b.no", "is_valid": False}],
+           "error: inbox inb_x has no channel that sends email - it has gmail",
+           "a broken channel is refused, and the error says what it found")
+
 print(f"\n{ok} checks passed")
