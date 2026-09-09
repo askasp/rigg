@@ -1,7 +1,7 @@
 """The corpus file, and the little that both the sync and the server need to
 know about it.
 
-One file per instance — `~/.rigg/mail/<instance>.db` — so two workspaces share
+One file per instance — `~/.rigg/instances/<instance>/corpus/<instance>.db` — so two workspaces share
 nothing at all, not even a `WHERE` clause. `RIGG_INSTANCE` is exported by
 `slack/run.sh`, so a server an agent starts from a channel opens the right
 corpus without being told which one.

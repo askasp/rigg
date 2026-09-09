@@ -670,7 +670,7 @@ a wrapper that reads it:
 
 ```sh
 # .rigg/front-mcp.sh
-set -a; . "$HOME/.rigg/secrets/${RIGG_INSTANCE:-default}.env"; set +a
+set -a; . "$HOME/.rigg/instances/${RIGG_INSTANCE:-default}/secrets.env"; set +a
 exec ...
 ```
 

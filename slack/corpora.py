@@ -12,8 +12,8 @@ one process would end up opening each other's database. Same reason `creds.py`
 is not called `secrets.py`.
 
 A corpus belongs to the **instance**, not to a channel and not to a repo —
-`~/.rigg/mail/<instance>.db` is one workspace's mail and nobody else's — so the
-registry is `~/.rigg/corpus/<instance>.json` and every channel of an instance
+`~/.rigg/instances/<instance>/corpus/<instance>.db` is one workspace's mail and nobody else's — so the
+registry is `~/.rigg/instances/<instance>/corpus.json` and every channel of an instance
 sees the same corpora. Which is the point: the corpus outlives the repo that
 happens to be drafting from it this month.
 

@@ -20,7 +20,7 @@ has — the rigg checkout's `mail/` sidecar keeps a searchable corpus of Front
 conversations and documents its own commands, and a repo's `.rigg/*-mcp.json`
 names the tools its agents are given. Use those in preference to raw HTTP.
 
-**Read `~/.rigg/notes/$RIGG_INSTANCE.md` if it exists** — a line each, what
+**Read `~/.rigg/instances/$RIGG_INSTANCE/notes.md` if it exists** — a line each, what
 earlier runs here worked out. It is outside any checkout, so `cat` it.
 
 **If you work something out that the next run would have to work out again** —

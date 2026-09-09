@@ -17,7 +17,7 @@ Messages are kept as Front gave them *as well as* cleaned. Cleaning is the part
 most likely to need improving, and `--rebuild` re-derives every pair from stored
 messages in seconds where re-fetching them is hours at 50 requests a minute.
 
-One corpus per instance — `~/.rigg/mail/<instance>.db` — so two workspaces share
+One corpus per instance — `~/.rigg/instances/<instance>/corpus/<instance>.db` — so two workspaces share
 nothing, not even a `WHERE` clause. `RIGG_INSTANCE` picks it, and `slack/run.sh`
 already exports that, so a server an agent starts from a channel opens the right
 one without being told.
@@ -33,8 +33,7 @@ there is no bridge running or the import needs an argument.
 A Front API token in the instance's env file:
 
 ```sh
-mkdir -p ~/.rigg/secrets && chmod 700 ~/.rigg/secrets
-cp mail/env.example ~/.rigg/secrets/default.env    # then fill it in
+rigg secret set FRONT_API_TOKEN <token>    # or edit the instance's secrets.env
 ```
 
 Then the first import, which walks every inbox:
@@ -136,7 +135,7 @@ Markdown headings, no tables. Lead with anything still UNANSWERED, grouped by
 what it is about, then one line per theme for the rest. Counts, not every
 message. If nothing needs a person, say so in one sentence.
 
-Write it to /home/aksel/.rigg/mail/digest.md and nothing else. Do not reply to
+Write it to /home/aksel/.rigg/instances/default/digest.md and nothing else. Do not reply to
 anyone and do not commit anything.
 
 {{inbox}}
@@ -145,7 +144,7 @@ anyone and do not commit anything.
 [[pipelines.digest.steps]]
 id = "post"
 run = """
-RIGG_BRANCH=digest RIGG_MESSAGE="$(cat /home/aksel/.rigg/mail/digest.md)" \
+RIGG_BRANCH=digest RIGG_MESSAGE="$(cat /home/aksel/.rigg/instances/default/digest.md)" \
   $HOME/git/rigg/slack/notify.sh
 """
 ```
@@ -294,7 +293,7 @@ The step most likely to be quietly wrong is the cleaning, and the way to see it
 is to read some:
 
 ```sh
-sqlite3 ~/.rigg/mail/default.db \
+sqlite3 ~/.rigg/instances/default/corpus/default.db \
   "SELECT reply_text FROM pairs ORDER BY random() LIMIT 10;"
 ```
 

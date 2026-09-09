@@ -369,7 +369,7 @@ RIGG-LEARNED: Front's /events only reaches back about 30 days.
 ```
 
 Those are appended, dated and attributed to the job, to
-`~/.rigg/notes/<instance>.md` — which the `do.md` prompt reads back at the start
+`~/.rigg/instances/<instance>/notes.md` — which the `do.md` prompt reads back at the start
 of the next run — and the report says what was noted. Written the same way a
 secret is: by the bridge, on the run's say-so, never by the run itself.
 
@@ -389,7 +389,7 @@ want one; the branch is then named `<channel>/cron-<id>`.
 
 Jobs belong to the channel they were defined in — they run against that
 channel's repo and report failures back there — and the store is one file per
-instance, `~/.rigg/cron/<instance>.json`, so two workspaces never see each
+instance, `~/.rigg/instances/<instance>/cron.json`, so two workspaces never see each
 other's. Defining one counts as starting work, so a look-but-not-launch channel
 cannot.
 
@@ -459,9 +459,9 @@ rigg  top 3 of what `mail` would show an agent answering that:
 ```
 
 A corpus belongs to the **instance**, not to a channel and not to a repo —
-`~/.rigg/mail/<instance>.db` is one workspace's mail and nobody else's — so
+`~/.rigg/instances/<instance>/corpus/<instance>.db` is one workspace's mail and nobody else's — so
 every channel of an instance sees the same corpora, and the register is
-`~/.rigg/corpus/<instance>.json`. Which is the point: the corpus outlives the
+`~/.rigg/instances/<instance>/corpus.json`. Which is the point: the corpus outlives the
 repo that happens to be drafting from it this month.
 
 #### Letting a run search one
@@ -571,8 +571,8 @@ Two files, deliberately:
 
 | | |
 | --- | --- |
-| `~/.rigg/secrets/<instance>.env` | Ansible templates this from the vault |
-| `~/.rigg/secrets/<instance>.local.env` | this writes this one |
+| `~/.rigg/instances/<instance>/secrets.env` | Ansible templates this from the vault |
+| `~/.rigg/instances/<instance>/secrets.local.env` | this writes this one |
 
 Anything written from chat into the first would vanish on the next converge, so
 it goes in the second, which Ansible never touches and which wins when both set

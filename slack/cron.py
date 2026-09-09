@@ -7,7 +7,7 @@
 
 A job belongs to the channel it was defined in: it runs against that channel's
 repo and reports back there. The store is one file per instance,
-`~/.rigg/cron/<instance>.json`, so two workspaces never see each other's jobs.
+`~/.rigg/instances/<instance>/cron.json`, so two workspaces never see each other's jobs.
 
 The bridge is already the per-instance daemon, so the schedule lives in it
 rather than in systemd. That means jobs only fire while the bridge is up —
@@ -194,7 +194,7 @@ def report(output: str) -> str | None:
 #
 #   RIGG-LEARNED: Front's /events only reaches back about 30 days.
 #
-# These go to ~/.rigg/notes/<instance>.md, which the prompt reads back — not to
+# These go to ~/.rigg/instances/<instance>/notes.md, which the prompt reads back — not to
 # the target repo's own capabilities file. An unattended writer must not leave a
 # dirty working tree in the checkout branches are cut from, and what a run works
 # out is usually about this workspace's accounts rather than that repo's code. A

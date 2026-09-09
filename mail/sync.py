@@ -471,7 +471,7 @@ def main() -> int:
     if not token:
         raise SystemExit(
             "FRONT_API_TOKEN is not set — put it in "
-            f"~/.rigg/secrets/{corpus.instance()}.env"
+            f"~/.rigg/instances/{corpus.instance()}/secrets.env"
         )
     front = Front(token)
 

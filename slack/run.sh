@@ -32,21 +32,15 @@ channels="slack/${inst:+$inst-}channels.toml"
 # Tokens for everything that is not Slack - the Front API, say - live in one
 # file per instance outside the repo, so a run started from a channel and one
 # started by a timer reach the same services. Optional: no file, no bother.
-secrets="$HOME/.rigg/secrets/${inst:-default}.env"
-if [ -f "$secrets" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$secrets"
-  set +a
-fi
-# Set from Slack, and not templated by Ansible, so it survives a converge and
-# wins on a clash.
-if [ -f "${secrets%.env}.local.env" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "${secrets%.env}.local.env"
-  set +a
-fi
+inst_dir="$HOME/.rigg/instances/${inst:-default}"
+for f in "$inst_dir/secrets.env" "$inst_dir/secrets.local.env"; do
+  if [ -f "$f" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+  fi
+done
 
 if [ ! -f "$env_file" ]; then
   echo "no $env_file — copy slack/env.example to it and put ${inst:-this workspace}'s tokens in it" >&2
