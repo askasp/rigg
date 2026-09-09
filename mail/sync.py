@@ -151,6 +151,10 @@ AUTO_SUBJECT = re.compile(
 # ---------------------------------------------------------------------------
 # Front
 
+class Forbidden(Exception):
+    """A scope the token was not granted."""
+
+
 class Front:
     BASE = "https://api2.frontapp.com"
 
@@ -184,6 +188,8 @@ class Front:
             if r.status_code >= 500:
                 time.sleep(2 ** attempt)
                 continue
+            if r.status_code == 403:
+                raise Forbidden(f"Front 403 on {url}: {r.text[:200]}")
             if not r.ok:
                 raise SystemExit(f"Front {r.status_code} on {url}: {r.text[:300]}")
             remaining = r.headers.get("x-ratelimit-remaining")
@@ -431,9 +437,24 @@ def incremental(db, front: Front) -> None:
         raise SystemExit("no watermark — run with --backfill first")
     touched: dict[str, dict] = {}
     high = after
-    for ev in front.paged(
-        "/events", {"q[after]": int(after), "q[types]": ["inbound", "outbound"]}
-    ):
+    try:
+        events = list(
+            front.paged(
+                "/events",
+                {"q[after]": int(after), "q[types]": ["inbound", "outbound"]},
+            )
+        )
+    except Forbidden:
+        # /events needs events:*:read, which not every token is granted. Walking
+        # the inboxes over the same window costs more requests and finds the
+        # same conversations, so a missing scope is a slower sync rather than a
+        # job that fails every fifteen minutes for the life of the token.
+        print("no events scope; walking inboxes over the window instead", file=sys.stderr)
+        backfill(db, front, after)
+        corpus.set_state(db, "events_after", str(time.time() - WATERMARK_OVERLAP))
+        db.commit()
+        return
+    for ev in events:
         conv = ev.get("conversation") or {}
         if conv.get("id"):
             touched[conv["id"]] = conv
