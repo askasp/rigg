@@ -38,8 +38,24 @@ fi
 # 1 step(s)" in a channel is noise nobody reads, which is how the one message
 # that matters gets missed. So without a thread, only failure is worth saying;
 # what a scheduled run has to report, it reports itself.
-if [ -z "$thread" ] && [ "${RIGG_EVENT:-}" != "failed" ]; then
-  [ "${RIGG_STATUS:-}" = "failed" ] || exit 0
+if [ -z "$thread" ]; then
+  if [ "${RIGG_EVENT:-}" != "failed" ] && [ "${RIGG_STATUS:-}" != "failed" ]; then
+    exit 0
+  fi
+  # rigg's own line is written for a run log next to the steps around it -
+  # "main [2/2] draft failed" says nothing in a channel, where "main" is
+  # whatever branch the box happens to be on. Compose one that stands alone.
+  repo=$(basename "${RIGG_REPO:-the repo}")
+  step="${RIGG_STEP:-a step}"
+  at=""
+  [ -n "${RIGG_INDEX:-}" ] && at=" (step $RIGG_INDEX of ${RIGG_TOTAL:-?})"
+  took=""
+  [ -n "${RIGG_ELAPSED:-}" ] && took=" after $RIGG_ELAPSED"
+  RIGG_MESSAGE="⚠️ scheduled run in \`$repo\` failed at \`$step\`$at$took"
+  if [ -n "${RIGG_TASK:-}" ]; then
+    RIGG_MESSAGE="$RIGG_MESSAGE
+task: ${RIGG_TASK}"
+  fi
 fi
 
 # A failing post must not fail the run, so every error here is swallowed.
