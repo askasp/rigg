@@ -1,0 +1,16 @@
+name = "mail"
+description = "Front conversations, paired inbound question to human reply."
+mcp_command = "mcp.sh"
+sync_command = "run.sh"
+backfill_command = "run.sh --backfill --since {{since}}"
+needs = ["FRONT_API_TOKEN"]
+sync_schedule = "*/15 * * * *"
+db = "default.db"
+ask_prompt = """
+{{task}}
+
+Use mcp__mail__search_replies to find how questions like this were answered
+before, and mcp__mail__get_thread to read one in full. Draft in the voice those
+replies establish. Change no files. End with a line `RIGG-REPORT` and then the
+draft.
+"""

@@ -1,4 +1,5 @@
 mod config;
+mod corpus;
 mod cron;
 mod headless;
 mod instance;
@@ -324,6 +325,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<SecretCmd>,
     },
+    /// Corpora a role can be given: what is available, and wiring one in.
+    Corpus {
+        #[command(subcommand)]
+        cmd: Option<CorpusCmd>,
+    },
     /// Schedules for this instance.
     Cron {
         #[command(subcommand)]
@@ -353,6 +359,22 @@ enum SecretCmd {
     Rm { name: String },
     /// List them, masked.
     List,
+}
+
+#[derive(Subcommand)]
+enum CorpusCmd {
+    /// Sidecars rigg can find, and whether each is wired into this repo.
+    List,
+    /// Write the wiring for one into this repo's .rigg/, to be reviewed.
+    Enable {
+        /// A sidecar name, or a path to one.
+        name: String,
+        /// Print what would be written, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Whether one is wired in, has its secret, and how fresh its data is.
+    Status { name: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -551,7 +573,7 @@ fn rewrite_pipeline_prefix(mut argv: Vec<String>) -> Vec<String> {
     }
     let first = argv[1].clone();
     // `cron add` and `cron run` are subcommands, not a pipeline called cron.
-    const NOT_A_PIPELINE: [&str; 4] = ["cron", "secret", "stack", "tick"];
+    const NOT_A_PIPELINE: [&str; 5] = ["corpus", "cron", "secret", "stack", "tick"];
     if first.starts_with('-')
         || NOT_A_PIPELINE.contains(&first.as_str())
         || !PIPELINE_VERBS.contains(&argv[2].as_str())
@@ -628,6 +650,7 @@ fn real_main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Secret { .. } | Cmd::Cron { .. } | Cmd::Tick { .. } => unreachable!("handled above"),
+        Cmd::Corpus { cmd } => corpus_cmd(&root, cli.config.as_deref(), cmd)?,
         Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
             let [preferred, legacy] = Config::candidates(&root);
@@ -3224,6 +3247,122 @@ fn prune(
 
 
 /// Refuse a run whose roles are missing a token, before any turn is spent.
+fn corpus_cmd(root: &std::path::Path, cfg_path: Option<&str>, cmd: Option<CorpusCmd>) -> Result<()> {
+    match cmd.unwrap_or(CorpusCmd::List) {
+        CorpusCmd::List => {
+            let all = corpus::discover();
+            if all.is_empty() {
+                println!("no corpus sidecars found");
+                println!("  a sidecar is a directory with a corpus.toml; set RIGG_CORPUS_PATH to look elsewhere");
+                return Ok(());
+            }
+            for m in &all {
+                let state = if corpus::enabled(root, m) { "wired in" } else { "available" };
+                println!("  {:<12} {:<10} {}", m.name, state, m.description.as_deref().unwrap_or(""));
+                println!("  {:<12} {}", "", m.dir.display());
+            }
+            println!("\n  rigg corpus enable <name>");
+        }
+        CorpusCmd::Enable { name, dry_run } => {
+            let m = corpus::find(&name)?;
+            let done = corpus::enable(root, &m, dry_run)?;
+            if dry_run {
+                println!("would write {}\n", done.mcp_file.display());
+                print!("{}", corpus::mcp_json(&m));
+                println!("\nwould append to {}:", done.config_file.display());
+                print!("{}", done.wiring);
+                return Ok(());
+            }
+            println!("wrote    {}", done.mcp_file.display());
+            println!("appended {}", done.config_file.display());
+            println!("\nNothing is committed - read the diff before you do.");
+
+            let have = instance::secrets();
+            let missing: Vec<&String> = m
+                .needs
+                .iter()
+                .filter(|n| !have.contains_key(*n) && !instance::set_in_env(n))
+                .collect();
+            if !missing.is_empty() {
+                println!("\nThen give instance `{}` what it needs:", instance::name());
+                for n in missing {
+                    println!("  rigg secret set {n} <value>");
+                }
+            }
+            if m.backfill_command.is_some() {
+                println!("\nFirst import, in the foreground so you can watch it:");
+                println!("  rigg run --pipeline {}-backfill --var since=<date>", m.name);
+            }
+            if let (Some(_), Some(sched)) = (&m.sync_command, &m.sync_schedule) {
+                println!("\nThen keep it fresh:");
+                println!("  rigg cron add \"{sched}\" --pipeline {}-sync", m.name);
+            }
+        }
+        CorpusCmd::Status { name } => {
+            let all = match name {
+                Some(n) => vec![corpus::find(&n)?],
+                None => corpus::discover(),
+            };
+            if all.is_empty() {
+                println!("no corpus sidecars found");
+                return Ok(());
+            }
+            let have = instance::secrets();
+            let cfg = Config::load(root, cfg_path).ok();
+            for m in &all {
+                println!("{}", m.name);
+                println!("  wiring   {}", if corpus::enabled(root, m) { "in this repo" } else { "NOT in this repo - rigg corpus enable" });
+                for n in &m.needs {
+                    let s = if have.contains_key(n) {
+                        format!("{} ({})", instance::mask(&have[n]), instance::provenance(n))
+                    } else if instance::set_in_env(n) {
+                        "from the environment".into()
+                    } else {
+                        "MISSING - rigg secret set".into()
+                    };
+                    println!("  {n:<8} {s}");
+                }
+                match corpus::db_path(m) {
+                    Some(p) if p.exists() => {
+                        let age = std::fs::metadata(&p)
+                            .and_then(|md| md.modified())
+                            .ok()
+                            .and_then(|t| t.elapsed().ok())
+                            .map(|d| format!("{} min ago", d.as_secs() / 60))
+                            .unwrap_or_else(|| "?".into());
+                        let size = std::fs::metadata(&p).map(|m| m.len() / 1024).unwrap_or(0);
+                        println!("  data     {size} KB, last written {age}");
+                        println!("           {}", p.display());
+                    }
+                    Some(p) => println!("  data     none yet at {}", p.display()),
+                    None => {}
+                }
+                if let Some(c) = &cfg {
+                    let jobs = cron::load().unwrap_or_default();
+                    let mine: Vec<&cron::Job> = jobs
+                        .iter()
+                        .filter(|j| j.pipeline.as_deref().map(|p| p.starts_with(&m.name)).unwrap_or(false))
+                        .collect();
+                    let _ = c;
+                    if mine.is_empty() {
+                        println!("  schedule none");
+                    } else {
+                        for j in mine {
+                            println!(
+                                "  schedule {} {} ({})",
+                                j.schedule,
+                                j.pipeline.as_deref().unwrap_or(""),
+                                j.last_status.as_deref().unwrap_or("not run yet")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn missing_secrets(cfg: &Config, steps: &[config::Step]) -> Result<()> {
     let have = instance::secrets();
     let mut missing: Vec<(String, String)> = Vec::new();
