@@ -71,13 +71,17 @@ def main() -> int:
         return 0
 
     counts: dict[str, int] = {}
+    errors = 0
+    looked_at = 0
     for item in waiting:
         if item["status"] == "redraft":
             continue
+        looked_at += 1
         try:
             action, _ = resolve_one(item)
         except outbox.SlackError as e:
             print(f"{item['id']}: {e}", file=sys.stderr)
+            errors += 1
             continue
         counts[action] = counts.get(action, 0) + 1
     for action, n in sorted(counts.items()):
@@ -93,6 +97,12 @@ def main() -> int:
         print("current draft:")
         print(item["draft"])
         print()
+
+    # A poll that could read nothing at all is broken, not quiet - and a job
+    # that reports ok every two minutes while reading nothing is worse than
+    # one that fails.
+    if errors and errors == looked_at:
+        return 1
     return 0
 
 
