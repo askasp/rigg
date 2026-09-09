@@ -85,10 +85,15 @@ MODIFIERS = [
 
 
 def short_alias(name: str, names: list[str]) -> str:
-    """The shortest obvious way to type a pipeline name."""
+    """The shortest obvious way to type a pipeline name.
+
+    Never one that is already a verb: `mail-ask` shortening to `ask` would
+    advertise something unreachable, because a command is matched before a
+    pipeline name is.
+    """
     if "-" in name:
         tail = name.rsplit("-", 1)[1]
-        if len([n for n in names if tail in n]) == 1:
+        if len([n for n in names if tail in n]) == 1 and tail not in COMMANDS:
             return tail
     return name
 
@@ -99,12 +104,12 @@ def help_for(channel: "Channel") -> str:
 
     for title, entries in HELP_GROUPS:
         rows = [(c, d) for c, d in entries if channel.may(c.split()[0]) is None]
-        # A repo that names variations of its pipeline offers those here too.
+        # A repo's own pipelines, named rather than spelled out: most take no
+        # task, and offering `sync <task>` for one that runs a shell step was
+        # advertising an argument it would refuse.
         if title == "Start work" and channel.may("new") is None and names:
-            rows += [
-                (f"{short_alias(n, names)} <task>", f"the same, on `{n}`")
-                for n in names
-            ]
+            short = " · ".join(f"`{short_alias(n, names)}`" for n in names)
+            rows.append(("<pipeline> <task>", f"start a stack on one of: {short}"))
         if not rows:
             continue
         width = max(len(c) for c, _ in rows)
