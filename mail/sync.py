@@ -359,44 +359,65 @@ def ingest(db, front: Front, cid: str, subject: str | None, inbox: dict | None) 
     rebuild_pairs(db, [cid])
 
 
-def recent(db, hours: float) -> str:
+def recent(front: Front, hours: float) -> str:
     """Inbound mail from the last `hours`, as text for a prompt.
 
-    A digest wants everything that arrived, answered or not, in the order it
-    arrived — which is the opposite of what `search_replies` does, and the
-    reason this is a command rather than a tool. Printed rather than returned
-    so a pipeline step can `capture` it.
+    Read from Front, not from the corpus. The corpus answers "how have we
+    answered this before" and accumulates; a digest answers "what arrived since
+    yesterday" and is only ever about now. Sharing a table made the second
+    question inherit the first's staleness - a sync three hours behind produced
+    a digest that was three hours wrong and looked perfectly normal - and made
+    a corpus a prerequisite for a report that does not need one.
+
+    A day of mail is a handful of requests, so the sharing bought nothing.
     """
     cutoff = time.time() - hours * 3600
-    rows = db.execute(
-        "SELECT m.conversation_id, m.created_at, m.author_email, m.subject,"
-        "       m.clean_text,"
-        "       (SELECT count(*) FROM messages r"
-        "         WHERE r.conversation_id = m.conversation_id"
-        "           AND r.is_inbound = 0 AND r.created_at > m.created_at) AS replies,"
-        "       (SELECT inbox_name FROM conversation_inbox c"
-        "         WHERE c.conversation_id = m.conversation_id) AS inbox"
-        "  FROM messages m"
-        " WHERE m.is_inbound = 1 AND m.created_at > ?"
-        + corpus.scope_sql("m")[0]
-        + " ORDER BY m.created_at",
-        [cutoff] + corpus.scope_sql("m")[1],
-    ).fetchall()
-    where = f" in {corpus.scope()}" if corpus.scope() else ""
+    want = corpus.scope()
+    where = f" in {want}" if want else ""
+    rows = []
+
+    for inbox in front.paged("/inboxes"):
+        if want and want not in (inbox.get("name"), inbox.get("id")):
+            continue
+        for conv in front.paged(f"/inboxes/{inbox['id']}/conversations"):
+            # Newest first, so the first one that started before the window
+            # means the rest of this inbox did too.
+            if (conv.get("last_message", {}) or {}).get("created_at", conv.get("created_at") or 0) < cutoff:
+                break
+            messages = [m for m in front.paged(f"/conversations/{conv['id']}/messages") if usable(m)]
+            messages.sort(key=lambda m: m.get("created_at") or 0)
+            for n, m in enumerate(messages):
+                if not m.get("is_inbound") or (m.get("created_at") or 0) < cutoff:
+                    continue
+                answered = any(
+                    not later.get("is_inbound") for later in messages[n + 1:]
+                )
+                raw = (m.get("text") or "").strip() or html_to_text(m.get("body") or "")
+                rows.append({
+                    "cid": conv["id"],
+                    "at": m.get("created_at") or 0,
+                    "from": author_email(m),
+                    "subject": m.get("subject") or conv.get("subject"),
+                    "inbox": inbox.get("name"),
+                    "answered": answered,
+                    "body": clean(raw),
+                })
+
     if not rows:
         return f"No mail arrived{where} in the last {hours:g} hours."
 
+    rows.sort(key=lambda r: r["at"])
     out = [f"{len(rows)} message(s){where} in the last {hours:g} hours.", ""]
     for r in rows:
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created_at"]))
-        state = "answered" if r["replies"] else "UNANSWERED"
-        body = (r["clean_text"] or "").strip()
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["at"]))
+        state = "answered" if r["answered"] else "UNANSWERED"
+        body = (r["body"] or "").strip()
         if len(body) > 800:
             body = body[:800] + " […]"
         out += [
-            f"--- {when}  {r['author_email'] or 'unknown'}  [{state}]",
+            f"--- {when}  {r['from'] or 'unknown'}  [{state}]",
             f"inbox: {r['inbox'] or '?'}   subject: {r['subject'] or '(none)'}",
-            f"id: {r['conversation_id']}",
+            f"id: {r['cid']}",
             body,
             "",
         ]
@@ -496,15 +517,8 @@ def main() -> int:
     if args.inbox:
         os.environ["RIGG_VAR_INBOX"] = args.inbox
 
-    db = corpus.connect(corpus.db_path())
-
-    if args.list:
-        # stdout, because a `capture` step reads it; everything else here
-        # reports on stderr.
-        print(recent(db, args.since_hours))
-        return 0
-
     if args.rebuild:
+        db = corpus.connect(corpus.db_path())
         n = rebuild_pairs(db)
         db.commit()
         print(f"rebuilt {n} pairs in {corpus.db_path()}", file=sys.stderr)
@@ -517,6 +531,15 @@ def main() -> int:
             f"~/.rigg/instances/{corpus.instance()}/secrets.env"
         )
     front = Front(token)
+
+    if args.list:
+        # stdout, because a `capture` step reads it; everything else here
+        # reports on stderr. No corpus is opened: a digest is about now, and
+        # needing one would make a report wait on an ingest it never uses.
+        print(recent(front, args.since_hours))
+        return 0
+
+    db = corpus.connect(corpus.db_path())
 
     if args.backfill:
         since = None
