@@ -118,8 +118,18 @@ def scope_sql(alias: str = "p") -> tuple[str, list]:
 
 
 def db_path(inst: str | None = None) -> Path:
-    root = Path(os.environ.get("RIGG_MAIL_DIR") or (Path.home() / ".rigg" / "mail"))
-    return root / f"{inst or instance()}.db"
+    """Where this instance's corpus lives.
+
+    Defaults to the instance layout rather than the old flat one, so a run
+    that starts the sidecar without rigg - a bare import, a shell by hand -
+    opens the corpus that exists instead of silently creating an empty one at
+    a dead path and answering every search with nothing.
+    """
+    i = inst or instance()
+    root = os.environ.get("RIGG_MAIL_DIR")
+    if root:
+        return Path(root) / f"{i}.db"
+    return Path.home() / ".rigg" / "instances" / i / "corpus" / f"{i}.db"
 
 
 def connect(path: Path) -> sqlite3.Connection:
