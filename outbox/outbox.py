@@ -112,8 +112,29 @@ def _slack(method: str, payload: dict, get: bool = False) -> dict:
     with urllib.request.urlopen(req, timeout=30) as r:
         out = json.load(r)
     if not out.get("ok"):
-        raise SlackError(f"{method}: {out.get('error')}")
+        raise SlackError(_explain(method, out.get("error", "")))
     return out
+
+
+NEEDED = {
+    "reactions.get": "reactions:read",
+    "conversations.replies": "groups:history (private channels) or channels:history",
+    "chat.postMessage": "chat:write",
+}
+
+
+def _explain(method: str, error: str) -> str:
+    """A missing scope is a five-minute fix in the Slack app, but only if the
+    message names the scope rather than saying missing_scope."""
+    if error == "missing_scope" and method in NEEDED:
+        return (
+            f"{method}: the bot token is missing {NEEDED[method]}. Add it under "
+            "OAuth & Permissions, reinstall the app, then "
+            "`rigg secret set SLACK_BOT_TOKEN <new token>`"
+        )
+    if error == "not_in_channel":
+        return f"{method}: invite the bot to the channel first"
+    return f"{method}: {error}"
 
 
 def channel() -> str:

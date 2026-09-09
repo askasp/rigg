@@ -12,15 +12,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
-from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
+from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 
 import outbox  # noqa: E402
 
-mcp = FastMCP("rigg-outbox")
+mcp = MCPServer("rigg-outbox")
 
 
-@mcp.tool()
 def propose_reply(conversation_id: str, subject: str, sender: str, draft: str,
                   why: str = "") -> str:
     """Post a mail and a suggested reply to Slack, and wait for a person.
@@ -45,7 +44,6 @@ def post_digest(text: str) -> str:
     return "posted"
 
 
-@mcp.tool()
 def redraft(item_id: str, draft: str) -> str:
     """Replace a waiting draft after feedback, and post the new one."""
     try:
@@ -65,8 +63,11 @@ def waiting() -> list[dict]:
     ]
 
 
+# Proposing and redrafting post to Slack, so they are only registered when a
+# role is meant to do that. `waiting` and `post_digest` are always safe.
+if os.environ.get("OUTBOX_MCP_READONLY") != "1":
+    mcp.tool()(propose_reply)
+    mcp.tool()(redraft)
+
 if __name__ == "__main__":
-    if os.environ.get("OUTBOX_MCP_READONLY") == "1":
-        mcp._tool_manager._tools.pop("propose_reply", None)
-        mcp._tool_manager._tools.pop("redraft", None)
     mcp.run()

@@ -193,4 +193,16 @@ os.environ["FRONT_AUTHOR_ID"] = "a"
 check("flag, token and author together are", outbox.sending_for_real())
 os.environ.pop("FRONT_SEND")
 
+# --- the server actually starts, and offers what it says it does ------------
+
+import asyncio  # noqa: E402
+import outbox_mcp as M  # noqa: E402
+
+names = {t.name for t in asyncio.run(M.mcp.list_tools())}
+check("the MCP server starts and registers its tools",
+      {"propose_reply", "redraft", "post_digest", "waiting"} <= names, str(names))
+
+check("sending is not a tool an agent can reach",
+      not any("send" in n for n in names), str(names))
+
 print(f"\n{ok} checks passed")
