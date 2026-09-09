@@ -8,7 +8,7 @@
 #
 # Instances are the ones `slack/run.sh` names: one workspace, one corpus.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 
 inst=""
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
@@ -34,4 +34,4 @@ done
 export RIGG_MAIL_DIR
 
 exec uv run --quiet --with "requests~=2.34" --with "mail-parser-reply~=1.36" \
-  mail/sync.py "$@"
+  sync.py "$@"

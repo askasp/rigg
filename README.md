@@ -858,10 +858,11 @@ rigg corpus enable mail --dry-run # exactly what it would write
 rigg corpus status                # wired in? token present? how old is the data?
 ```
 
-`enable` leaves everything uncommitted, to be read before it is committed —
-capability stays capability, you just stop typing it. It writes the role (with
-its `needs`), a `<name>-sync` and `<name>-backfill` pipeline, and a `<name>-ask`
-pipeline from the prompt the sidecar suggests. Then:
+`enable` copies the sidecar into `<repo>/.rigg/tools/<name>/` and writes the
+role (with its `needs`), a `<name>-sync` and `<name>-backfill` pipeline, and a
+`<name>-ask` pipeline from the prompt the sidecar suggests — all naming the tool
+relatively, so nothing in the committed config points at anybody's home
+directory. It leaves everything uncommitted, to be read first. Then:
 
 ```sh
 rigg secret set FRONT_API_TOKEN ...
@@ -870,10 +871,14 @@ rigg cron add "*/15 * * * *" --pipeline mail-sync
 rigg run --pipeline mail-ask --task "how long do blood test results take?"
 ```
 
-Sidecars are found on `RIGG_CORPUS_PATH`, defaulting to rigg's own checkout. A
-new kind is a new directory, not a change to rigg — which is what the registry
-this replaced could never do, since its kinds were hardcoded and chat could
-only turn on one somebody had already written.
+Sidecars to copy from are found on `RIGG_CORPUS_PATH`, defaulting to rigg's own
+checkout. A new kind is a new directory, not a change to rigg — which is what
+the registry this replaced could never do, since its kinds were hardcoded and
+chat could only turn on one somebody had already written.
+
+Once copied, the tool belongs to the repo: editing it there is expected, and a
+fix upstream is copied down rather than picked up. That is the trade for a
+checkout that works on any machine without a tool search path to configure.
 
 ## Waiting for a person
 

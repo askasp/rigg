@@ -49,14 +49,17 @@ impl Manifest {
         self.agent_kind.clone().unwrap_or_else(|| "claude".into())
     }
 
-    fn abs(&self, cmd: &str) -> String {
+    /// Where the sidecar sits once it is in the repo. Generated config points
+    /// here and nowhere else - an absolute path into whoever ran `enable`
+    /// would only work on their machine.
+    pub fn vendored(&self) -> String {
+        format!("./.rigg/tools/{}", self.name)
+    }
+
+    fn rel(&self, cmd: &str) -> String {
         let (bin, rest) = cmd.split_once(' ').unwrap_or((cmd, ""));
-        let path = self.dir.join(bin);
-        if rest.is_empty() {
-            path.display().to_string()
-        } else {
-            format!("{} {rest}", path.display())
-        }
+        let path = format!("{}/{bin}", self.vendored());
+        if rest.is_empty() { path } else { format!("{path} {rest}") }
     }
 
     pub fn load(dir: &Path) -> Result<Manifest> {
@@ -160,14 +163,14 @@ pub fn wiring(m: &Manifest) -> String {
         s.push_str(&format!(
             "\n[[pipelines.{}-sync.steps]]\nid = \"sync\"\nrun = \"{}\"\n",
             m.name,
-            m.abs(c)
+            m.rel(c)
         ));
     }
     if let Some(c) = &m.backfill_command {
         s.push_str(&format!(
             "\n[[pipelines.{}-backfill.steps]]\nid = \"backfill\"\nrun = \"{}\"\n",
             m.name,
-            m.abs(c)
+            m.rel(c)
         ));
     }
     if let Some(p) = &m.ask_prompt {
@@ -183,16 +186,50 @@ pub fn wiring(m: &Manifest) -> String {
 
 pub fn mcp_json(m: &Manifest) -> String {
     format!(
-        "{{\n  \"mcpServers\": {{\n    \"{}\": {{ \"command\": \"{}\" }}\n  }}\n}}\n",
+        "{{\n  \"mcpServers\": {{\n    \"{}\": {{ \"command\": \"{}/{}\" }}\n  }}\n}}\n",
         m.name,
-        m.dir.join(&m.mcp_command).display()
+        m.vendored(),
+        m.mcp_command
     )
 }
 
 pub struct Enabled {
     pub mcp_file: PathBuf,
     pub config_file: PathBuf,
+    pub tools_dir: PathBuf,
+    pub copied: usize,
     pub wiring: String,
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<usize> {
+    let mut n = 0;
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let name = e.file_name();
+        // Caches and local state are not part of the tool.
+        if name == "__pycache__" || name == ".git" {
+            continue;
+        }
+        let (src, dst) = (e.path(), to.join(&name));
+        if src.is_dir() {
+            n += copy_tree(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {}", src.display()))?;
+            // cp keeps the mode; std::fs::copy does too, but be explicit about
+            // the one that matters: a wrapper nobody can execute.
+            if let Ok(md) = src.metadata() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &dst,
+                    std::fs::Permissions::from_mode(md.permissions().mode()),
+                );
+            }
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Write the wiring into the repo, leaving it uncommitted to be read.
@@ -209,8 +246,15 @@ pub fn enable(root: &Path, m: &Manifest, dry_run: bool) -> Result<Enabled> {
         bail!("no {} - run `rigg init` first", cfg.display());
     }
     let mcp_file = config_dir(root).join("mcp").join(format!("{}.json", m.name));
+    let tools_dir = config_dir(root).join("tools").join(&m.name);
     let wiring = wiring(m);
+    let mut copied = 0;
     if !dry_run {
+        // The tool goes into the repo that uses it, so the config can name it
+        // relatively and the checkout is a complete description of what rigg
+        // can do here. Diverging from upstream afterwards is allowed.
+        copied = copy_tree(&m.dir, &tools_dir)
+            .with_context(|| format!("copying {} into the repo", m.name))?;
         if let Some(d) = mcp_file.parent() {
             std::fs::create_dir_all(d)?;
         }
@@ -223,7 +267,7 @@ pub fn enable(root: &Path, m: &Manifest, dry_run: bool) -> Result<Enabled> {
         body.push_str(&wiring);
         std::fs::write(&cfg, body).with_context(|| format!("writing {}", cfg.display()))?;
     }
-    Ok(Enabled { mcp_file, config_file: cfg, wiring })
+    Ok(Enabled { mcp_file, config_file: cfg, tools_dir, copied, wiring })
 }
 
 #[cfg(test)]
@@ -253,12 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn a_command_is_made_absolute_without_losing_its_arguments() {
+    fn a_command_points_into_the_repo_without_losing_its_arguments() {
         assert_eq!(
-            m().abs("run.sh --backfill --since {{since}}"),
-            "/opt/rigg/mail/run.sh --backfill --since {{since}}"
+            m().rel("run.sh --backfill --since {{since}}"),
+            "./.rigg/tools/mail/run.sh --backfill --since {{since}}"
         );
-        assert_eq!(m().abs("run.sh"), "/opt/rigg/mail/run.sh");
+        assert_eq!(m().rel("run.sh"), "./.rigg/tools/mail/run.sh");
     }
 
     #[test]
@@ -267,7 +311,8 @@ mod tests {
         assert!(w.contains("needs = [\"FRONT_API_TOKEN\"]"), "{w}");
         assert!(w.contains("--allowedTools\", \"mcp__mail\""), "{w}");
         assert!(w.contains("[[pipelines.mail-sync.steps]]"), "{w}");
-        assert!(w.contains("/opt/rigg/mail/run.sh --backfill"), "{w}");
+        assert!(w.contains("./.rigg/tools/mail/run.sh --backfill"), "{w}");
+        assert!(!w.contains("/opt/rigg"), "no absolute path may reach the repo: {w}");
     }
 
     #[test]
@@ -279,6 +324,6 @@ mod tests {
     #[test]
     fn the_mcp_key_is_the_tool_prefix() {
         let j = mcp_json(&m());
-        assert!(j.contains("\"mail\": { \"command\": \"/opt/rigg/mail/mcp.sh\" }"), "{j}");
+        assert!(j.contains("\"mail\": { \"command\": \"./.rigg/tools/mail/mcp.sh\" }"), "{j}");
     }
 }

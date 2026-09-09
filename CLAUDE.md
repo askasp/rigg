@@ -32,6 +32,15 @@ tenant, not to a repo.
 message into an argv and renders what comes back. It owns no logic. If the
 bridge needs a verb rigg does not have, that is a bug in rigg — add the verb.
 
+**Nothing in a repo's config may name an absolute path.** A tool a pipeline
+runs is vendored into `<repo>/.rigg/tools/` and named relatively, so a clone
+works on somebody else's machine and the checkout is a complete description of
+what rigg can do there. `rigg corpus enable` does the copying. The duplication
+is deliberate: with one consumer it costs nothing, and a second one is when the
+shared interface becomes knowable rather than guessed. There is no tool search
+path, no install step and no `$PATH` convention to learn — that was considered
+and rejected as a third way to find things.
+
 **Identity is typed and takes effect now; capability is written and reviewed.**
 `rigg secret set` and `rigg cron add` mutate instance state immediately.
 Anything that changes what an agent *can do* writes a diff into `<repo>/.rigg/`
@@ -43,6 +52,7 @@ and leaves it uncommitted. Never silently mutate a repo's capability.
 | --- | --- | --- |
 | a pipeline, role, prompt, feature, var | `<repo>/.rigg/rigg.toml` | no |
 | a corpus kind | a sidecar directory with a `corpus.toml` | no |
+| a tool a pipeline runs | `<repo>/.rigg/tools/` — `rigg corpus enable` copies it there | no |
 | a tool surface for an agent | an MCP server + `.rigg/mcp/*.json` | no |
 | an approval action | `[approvals.<name>]` in the repo config | no |
 | a schedule | `rigg cron add` | no |

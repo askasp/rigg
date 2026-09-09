@@ -7,7 +7,7 @@
 # RIGG_INSTANCE picks the corpus. A run started from a Slack channel already
 # has it; one started by hand falls back to `default`.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")"
 
 : "${RIGG_INSTANCE:=default}"
 export RIGG_INSTANCE
@@ -27,4 +27,4 @@ done
 export RIGG_MAIL_DIR
 
 # stdout is the protocol here, so uv must not chat on it.
-exec uv run --quiet --with "requests~=2.34" --with "mcp~=2.2" mail/mail_mcp.py
+exec uv run --quiet --with "requests~=2.34" --with "mcp~=2.2" mail_mcp.py

@@ -3300,12 +3300,14 @@ fn corpus_cmd(root: &std::path::Path, cfg_path: Option<&str>, cmd: Option<Corpus
             let m = corpus::find(&name)?;
             let done = corpus::enable(root, &m, dry_run)?;
             if dry_run {
+                println!("would copy  {} -> {}", m.dir.display(), done.tools_dir.display());
                 println!("would write {}\n", done.mcp_file.display());
                 print!("{}", corpus::mcp_json(&m));
                 println!("\nwould append to {}:", done.config_file.display());
                 print!("{}", done.wiring);
                 return Ok(());
             }
+            println!("copied   {} file(s) -> {}", done.copied, done.tools_dir.display());
             println!("wrote    {}", done.mcp_file.display());
             println!("appended {}", done.config_file.display());
             println!("\nNothing is committed - read the diff before you do.");
