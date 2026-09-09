@@ -12,6 +12,7 @@ a channel only its own work.
 
 from __future__ import annotations
 
+import functools
 import json
 import mimetypes
 import os
@@ -29,6 +30,10 @@ import urllib.request
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import corpora
+import creds
+import cron
 
 HERE = Path(__file__).resolve().parent
 RIGG = os.environ.get("RIGG_BIN", str(HERE.parent / "target" / "release" / "rigg"))
@@ -56,6 +61,11 @@ HELP_GROUPS = [
         ("logs <stack>", "the tail of a run's log"),
         ("urls <stack>", "links the run printed — previews, PRs"),
         ("parts", "the optional parts you can add"),
+    ]),
+    ("What an agent can draw on", [
+        ("corpus", "bodies of past work it can search, and how fresh each is"),
+        ("corpus search <text>", "what an agent drafting that would be shown"),
+        ("corpus add mail", "build one from Front, and keep it current"),
     ]),
     ("When it has landed", [
         ("rm <stack>", "what removing it would do"),
@@ -122,7 +132,7 @@ def help_for(channel: "Channel") -> str:
 
 
 # Commands that put an agent to work, as opposed to looking at what it did.
-MUTATING = {"new", "adopt", "add", "say"}
+MUTATING = {"new", "adopt", "add", "say", "cron", "secret", "corpus"}
 
 
 class Channel:
@@ -210,7 +220,9 @@ def run_rigg(repo: Path, args: list[str], timeout: int = 120) -> tuple[int, str]
             stdin=subprocess.DEVNULL,
             # A command line is no use in a message: anything rigg suggests
             # back should be typable where it is being read.
-            env={**os.environ, "RIGG_ADDRESSED_AS": "@rigg"},
+            # Read now, not inherited at boot: a credential set in Slack a
+            # minute ago has to reach this run without restarting the bridge.
+            env={**os.environ, **creds.current(), "RIGG_ADDRESSED_AS": "@rigg"},
         )
     except subprocess.TimeoutExpired:
         return 1, f"`rigg {' '.join(args)}` timed out after {timeout}s"
@@ -473,6 +485,35 @@ def agent_only(mods: list[str]) -> list[str]:
             for a in ("--agent", mods[i + 1])]
 
 
+def plan_args(mods: list[str]) -> list[str]:
+    """The modifiers that shape a plan: the agent, and which parts are on.
+
+    `--var` fills a placeholder in a prompt and moves no step, so it is left
+    out rather than passed to a command that would only have to ignore it.
+    """
+    shaping = ("--agent", "--with", "--without")
+    return [a for i, m in enumerate(mods) if m in shaping
+            for a in (m, mods[i + 1])]
+
+
+def with_plan(repo: Path, head: str, mods: list[str],
+              pipeline: str | None = None) -> str:
+    """`head`, and under it what the run will actually do.
+
+    The worktree path and the pid rigg prints belong to the machine it runs
+    on and mean nothing in a channel. What is worth reading here is the list
+    of steps and the model each one runs - both of which the modifiers on the
+    task can move, which is the other half of why they are worth printing.
+    """
+    args = ["plan"] + plan_args(mods)
+    if pipeline:
+        args += ["--pipeline", pipeline]
+    code, out = run_rigg(repo, args)
+    if code != 0 or not out.strip():
+        return head
+    return f"{head}\n```\n{out}\n```"
+
+
 def image_args(images: list[str]) -> list[str]:
     """rigg flags for attached images.
 
@@ -516,6 +557,21 @@ def match_pipeline(repo: Path, word: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def features(repo: Path) -> list[str]:
+    """The optional part names, so a `+part` can be told from a typo."""
+    code, out = run_rigg(repo, ["features"])
+    if code != 0:
+        return []
+    names = []
+    # The first line is the heading; a part is the first word of an indented
+    # line, and a continuation line starts with `on`/`off` instead.
+    for line in out.splitlines()[1:]:
+        head = line[:1].isspace() and line.split()[:1]
+        if head and head[0] not in ("on", "off"):
+            names.append(head[0])
+    return names
+
+
 def own_stacks(repo: Path, prefix: str) -> list[str]:
     code, out = run_rigg(repo, ["stack", "names"])
     if code != 0:
@@ -555,7 +611,7 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
     if code != 0:
         say(f"could not start `{stack}`:\n```\n{out[:2500]}\n```")
         return
-    posted = say(f"started `{stack}`\n```\n{out[:1500]}\n```")
+    posted = say(with_plan(repo, f"started `{stack}`", mods, pipeline))
     ts = ts_of(posted)
     if ts:
         remember_thread(repo, stack, channel, ts)
@@ -617,7 +673,7 @@ def cmd_adopt(repo: Path, prefix: str, rest: str, say, channel: str,
     if code != 0:
         say(f"could not adopt `{branch}`:\n```\n{out[:2500]}\n```")
         return
-    posted = say(f"took over the existing branch `{branch}`\n```\n{out[:1500]}\n```")
+    posted = say(with_plan(repo, f"took over the existing branch `{branch}`", mods, pipeline))
     ts = ts_of(posted)
     if ts:
         remember_thread(repo, branch, channel, ts, stack=stack)
@@ -682,7 +738,7 @@ def cmd_add(repo: Path, prefix: str, rest: str, say, channel: str,
         say(f"could not extend `{stack}`:\n```\n{out[:2500]}\n```")
         return
     branch = first_backticked(out) or stack
-    posted = say(f"queued `{branch}`\n```\n{out[:1500]}\n```")
+    posted = say(with_plan(repo, f"queued `{branch}`", mods))
     ts = ts_of(posted)
     if ts:
         remember_thread(repo, branch, channel, ts)
@@ -716,6 +772,18 @@ def cmd_say(repo: Path, prefix: str, rest: str, say, channel: str,
     message = " ".join(words)
     if not message:
         say("`say <stack> <message>`")
+        return
+
+    # `say <stack> run +copilot` is an easy slip to make: `+part` shapes a run,
+    # and a say is a sentence to the agent - the word would arrive inside the
+    # prompt, cost a turn, and move no step. `features` is only asked when
+    # something in the message could be one.
+    maybe = [w for w in message.split() if re.fullmatch(r"[+-][a-zA-Z][\w-]*", w)]
+    named = next((w[1:] for w in maybe if w[1:] in features(repo)), None) if maybe else None
+    if named:
+        say(f"`{named}` is an optional part, and `say` only talks to the agent — "
+            f"it would read `+{named}` as a word. "
+            f"`continue {short} +{named}` is what runs those steps.")
         return
 
     say(f"passing that to `{stack}`...")
@@ -1338,6 +1406,19 @@ COMMANDS = {
     "remove": cmd_rm,
 }
 
+# Recurring jobs live in their own module; it needs the pipeline list to refuse
+# a job that could never run, and rigg itself to run one.
+COMMANDS["cron"] = functools.partial(
+    cron.command, pipelines=pipelines, run_rigg=run_rigg,
+    split_modifiers=split_modifiers, features=features,
+)
+COMMANDS["crons"] = COMMANDS["cron"]
+
+# What an agent can search while it works. Per instance rather than per repo,
+# so it is registered here and not in anyone's `rigg.toml`.
+COMMANDS["corpus"] = corpora.command
+COMMANDS["corpora"] = COMMANDS["corpus"]
+
 
 def parse(text: str) -> tuple[str, str]:
     """Strip any mention, then split into verb and the rest."""
@@ -1448,6 +1529,29 @@ def main() -> int:
                 "and come from Install App -> Install to Workspace."
             )
         raise SystemExit(f"could not start: {detail}")
+
+    # Recurring jobs fire from here rather than from systemd: this process is
+    # already the per-instance daemon, and a job only makes sense while the
+    # bridge that reports it is up.
+    def post(channel: str, text: str):
+        return app.client.chat_postMessage(channel=channel, text=text)
+
+    cron.Scheduler(run_rigg=run_rigg, post=post).start()
+
+    # And the corpora those jobs draft from. A corpus nobody is keeping current
+    # is the failure that looks like the agent inventing last year's price.
+    corpora.Syncer(post=post).start()
+
+    def channel_is_private(channel_id: str) -> bool | None:
+        """True, False, or None when Slack will not say."""
+        try:
+            info = app.client.conversations_info(channel=channel_id)["channel"]
+        except Exception:
+            return None
+        return bool(info.get("is_private") or info.get("is_im"))
+
+    COMMANDS["secret"] = functools.partial(creds.command, is_private=channel_is_private)
+    COMMANDS["secrets"] = COMMANDS["secret"]
 
     pool = ThreadPoolExecutor(max_workers=4)
     names: dict[str, str] = {}

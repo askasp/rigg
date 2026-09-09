@@ -28,6 +28,7 @@ rigg doctor                           # checks the whole chain
 rigg run --task "Add rate limiting to the upload endpoint"
 rigg run --from self-review           # resume partway through
 rigg run --only test --dry-run        # see what would happen, touch nothing
+rigg plan                             # the steps a run would take, and on what
 rigg status
 ```
 
@@ -581,6 +582,35 @@ not fail — it describes the change, writes nothing and exits 0, so the step is
 reported ok and the run dies later at `git push` with a branch that has no
 commits.
 
+### Which model each step runs
+
+`kind` names the binary; the model is that binary's own setting, and rigg sets
+nothing. `rigg plan` reads it back, so the two can be looked at together:
+
+```sh
+rigg plan
+rigg plan --agent reviewer=claude --with copilot
+```
+
+```
+1  implement     impl      opencode vllm/qwen3-coder-next
+2  review        reviewer  claude opus[1m]
+3  apply-review  impl      opencode vllm/qwen3-coder-next
+4  commit        impl      opencode vllm/qwen3-coder-next
+5  push-and-pr   shell
+```
+
+It takes the same `--pipeline`, `--agent`, `--with` and `--without` a run takes,
+and prints the run those would start: the steps that survive the optional parts,
+in order, with the role, kind and model behind each agent step. A step whose
+`when_changed` has yet to be decided says so rather than promising to run.
+
+The model is read where the agent itself would read it — `--model`/`-m` in the
+role's `args`, then `ANTHROPIC_MODEL` or `OPENCODE_MODEL`, then the checkout's
+`.claude/settings*.json` or `opencode.json[c]`, then the user's. A role with its
+own `command` runs something rigg knows nothing else about, so unless that argv
+carries a `--model` it reports `(its own default)` rather than guessing.
+
 ## Asking about the code
 
 ```sh
@@ -604,6 +634,55 @@ with the agent put in a read-only mode - `--permission-mode plan` for claude,
 and that is the opposite of what a question wants. A role with its own
 `command` cannot be made read-only that way, and says so.
 
+## Giving an agent tools
+
+rigg has no MCP of its own and does not need any: `args` reaches the agent
+untouched, so the flags claude already has are the whole mechanism. Describe the
+servers in a file next to the config, and name it from the role that should have
+them:
+
+```toml
+[agents.mailer]
+kind = "claude"
+args = ["--permission-mode", "bypassPermissions",
+        "--mcp-config", ".rigg/front-mcp.json", "--strict-mcp-config",
+        "--allowedTools", "mcp__front"]
+```
+
+```json
+// .rigg/front-mcp.json
+{ "mcpServers": { "front": { "command": "./.rigg/front-mcp.sh" } } }
+```
+
+`--strict-mcp-config` is what makes that file the *complete* list — without it
+the agent also picks up whatever is configured globally, which is a different set
+of tools on every machine. `--allowedTools` and `--mcp-config` are variadic, and
+the prompt is appended after `args`, so rigg ends a claude turn's flags with `--`
+— without it a role written in this order would have its prompt read as one more
+tool name, and claude would then report having been given no prompt at all. With an `--allowedTools` naming only the server, a
+role can be given a surface and nothing else: no shell, no files, no web. The
+path is relative to the worktree root, which is where the agent runs.
+
+Secrets ride the environment, because rigg passes its own down untouched and adds
+only `PWD`. A token exported before `rigg` reaches the agent, its shell steps and
+any server they start. To keep one out of your shell instead, point the server at
+a wrapper that reads it:
+
+```sh
+# .rigg/front-mcp.sh
+set -a; . "$HOME/.rigg/secrets/${RIGG_INSTANCE:-default}.env"; set +a
+exec ...
+```
+
+Two things this cannot do, both by design elsewhere. `rigg ask` replaces `args`
+with a read-only mode, so a **question** gets no tools — see above. And
+`--agent <kind>` drops `args` with them, so a run swapped to another agent loses
+its servers; a role you swap often is better written out twice.
+
+Scripts and skills need nothing here. A `run` step calls anything in the repo,
+and an agent started in a checkout already reads that repo's own instructions —
+`prompt_file` naming a path is how the review step points at one.
+
 ## Reporting progress
 
 ```toml
@@ -618,10 +697,41 @@ one-line summary), plus `RIGG_BRANCH`, `RIGG_STEP`, `RIGG_STATUS`,
 `RIGG_INDEX`, `RIGG_TOTAL`, `RIGG_ELAPSED`, `RIGG_REPO` and `RIGG_TASK`.
 
 A failing hook never fails a run — it prints a line and the run carries on.
-`--dry-run` does not fire it.
+`--dry-run` does not fire it, and neither does `say`: a single turn asked for
+by hand is answered to whoever asked, and reporting it as a one-step pipeline
+only buries where the branch actually is.
+
+`RIGG_INDEX` and `RIGG_TOTAL` count against the whole pipeline, not against the
+slice being run — so a `continue` that picks up at `audit` reports `[8/9]`, the
+number a reader can find in the plan the branch started with, rather than
+`[1/2]`, which reads as a fresh run of something else.
 
 `slack/` uses this to drive [rigg from a Slack channel](slack/README.md), one
-repo per channel.
+repo per channel, and [`mail/`](mail/README.md) gives an agent a corpus of past
+replies to draft from — built and kept current from the channel with
+`@rigg corpus add mail`, and searchable from there too, so what a scheduled
+draft will be shown can be read before the schedule fires.
+
+## On a schedule
+
+Scheduling is cron's job, not rigg's — there is no daemon here and no reason to
+grow one. What a scheduled run needs is the environment cron will not give it:
+
+```
+0 7 * * * /home/aksel/git/rigg/cron.sh amino ~/git/amino-monorepo \
+          new morning-mail "draft replies to anything unanswered overnight"
+```
+
+`cron.sh <instance> <repo> <rigg args...>` supplies a PATH with `uv` and the
+agent on it, the instance's tokens, and `RIGG_INSTANCE`, then runs the command
+in that repo. `new` returns immediately and runs detached, so the crontab entry
+does not sit there holding the run.
+
+Two things to know before scheduling one. A pipeline with a `confirm` step
+cannot run unattended at all — rigg says so rather than skipping the step — so
+schedule one without. And a run nobody started from Slack has no thread to
+report in: set `RIGG_NOTIFY_CHANNEL` in the instance's env file and the notify
+hook posts to that channel instead, or the run reports nowhere.
 
 ## Things worth knowing
 

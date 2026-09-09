@@ -1,5 +1,8 @@
 /target
 .rigg/
 __pycache__/
-slack/channels.toml
-slack/.env
+# One env file and one channels file per Slack instance: `.env` +
+# `channels.toml` for the unnamed one, `<name>.env` + `<name>-channels.toml`
+# for the rest. The examples stay tracked.
+slack/*.env
+slack/*channels.toml

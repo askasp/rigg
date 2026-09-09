@@ -17,15 +17,25 @@ comment="${2:-}"
 
 [ -f "$file" ] || { echo "no such file: $file" >&2; exit 1; }
 [ -n "${SLACK_BOT_TOKEN:-}" ] || { echo "SLACK_BOT_TOKEN is not set" >&2; exit 0; }
-[ -n "${RIGG_BRANCH:-}" ] || { echo "RIGG_BRANCH is not set" >&2; exit 0; }
 
-common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-state="$common/rigg/slack/${RIGG_BRANCH//\//-}.json"
-[ -f "$state" ] || { echo "no slack thread recorded for $RIGG_BRANCH" >&2; exit 0; }
+channel=""
+thread=""
+if [ -n "${RIGG_BRANCH:-}" ]; then
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=""
+  state="$common/rigg/slack/${RIGG_BRANCH//\//-}.json"
+  if [ -n "$common" ] && [ -f "$state" ]; then
+    channel=$(jq -r '.channel // empty' "$state")
+    thread=$(jq -r '.thread_ts // empty' "$state")
+  fi
+fi
 
-channel=$(jq -r '.channel // empty' "$state")
-thread=$(jq -r '.thread_ts // empty' "$state")
-[ -n "$channel" ] || exit 0
+# The same fallback notify.sh has: a run nobody started from Slack - a digest
+# on a timer, say - has no thread, but still has somewhere to put a file.
+[ -n "$channel" ] || channel="${RIGG_NOTIFY_CHANNEL:-}"
+[ -n "$channel" ] || {
+  echo "no Slack thread for ${RIGG_BRANCH:-this run}, and no RIGG_NOTIFY_CHANNEL" >&2
+  exit 0
+}
 
 name=$(basename "$file")
 size=$(wc -c < "$file" | tr -d ' ')

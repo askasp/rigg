@@ -1,6 +1,7 @@
 mod config;
 mod headless;
 mod media;
+mod model;
 mod pipeline;
 mod stack;
 mod util;
@@ -261,6 +262,21 @@ enum Cmd {
         /// Agent role, kind, or `role=kind` (default: the first role configured).
         #[arg(long)]
         agent: Option<String>,
+    },
+    /// Show the steps a run would take, and what will run each of them.
+    Plan {
+        #[arg(long)]
+        pipeline: Option<String>,
+        /// Run agent steps on another kind: `--agent opencode` swaps every
+        /// role, `--agent reviewer=opencode` swaps one. Repeatable.
+        #[arg(long = "agent", value_name = "[ROLE=]KIND")]
+        agents: Vec<String>,
+        /// Turn an optional part on for this plan.
+        #[arg(long = "with", value_name = "FEATURE")]
+        with_features: Vec<String>,
+        /// Turn an optional part off for this plan.
+        #[arg(long = "without", value_name = "FEATURE")]
+        without_features: Vec<String>,
     },
     /// Show the branch and stack state.
     Status,
@@ -586,6 +602,25 @@ fn real_main() -> Result<()> {
             for name in cfg.pipelines.keys() {
                 println!("{name}");
             }
+        }
+
+        Cmd::Plan {
+            pipeline,
+            agents,
+            with_features,
+            without_features,
+        } => {
+            let mut cfg = Config::load(&root, cli.config.as_deref())?;
+            // Quietly: the plan names the kind and model each step ends up
+            // with, so a line announcing the swap says it a second time.
+            override_agents(&mut cfg, &agents, false)?;
+            let steps = pipeline_steps(
+                &cfg, pipeline.as_deref(), &with_features, &without_features,
+            )?;
+            if steps.is_empty() {
+                println!("this pipeline has no steps");
+            }
+            print!("{}", plan_text(&cfg, &root, &steps));
         }
 
         Cmd::Status => {
@@ -1214,7 +1249,13 @@ fn real_main() -> Result<()> {
             // happened, or worse, failed for a reason belonging to that run.
             let started = std::time::Instant::now();
             note_in_log(&root, &entry.branch, &format!("say: {}", first_line(&message_for_commit)));
-            let outcome = pipeline::Runner::new(dir.clone(), cfg, vars, false).run(&[step]);
+            let mut runner = pipeline::Runner::new(dir.clone(), cfg, vars, false);
+            // Whoever asked for a `say` is already being answered - by the
+            // terminal, or by the bridge that posted the message. Three more
+            // lines calling it a one-step pipeline only bury where the branch
+            // actually is.
+            runner.announce = false;
+            let outcome = runner.run(&[step]);
             line_in_log(
                 &root,
                 &entry.branch,
@@ -1928,7 +1969,7 @@ fn start_detached(
 /// being replaced - claude takes `--permission-mode`, opencode does not take
 /// it at all, so carrying them over would produce an agent that cannot start.
 /// What the new kind cannot work without, it gets: see `default_args`.
-fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
+fn override_agents(cfg: &mut Config, specs: &[String], announce: bool) -> Result<()> {
     for spec in specs {
         let (roles, kind): (Vec<String>, &str) = match spec.split_once('=') {
             Some((role, kind)) => {
@@ -1948,14 +1989,16 @@ fn override_agents(cfg: &mut Config, specs: &[String]) -> Result<()> {
             if a.kind == kind {
                 continue;
             }
-            let dropped = !a.args.is_empty() || a.command.is_some();
-            let gained = default_args(kind);
-            println!(
-                "  role `{role}`: {} -> {kind}{}{}",
-                a.kind,
-                if dropped { ", dropping args written for it" } else { "" },
-                if gained.is_empty() { String::new() } else { format!(", using {}", gained.join(" ")) }
-            );
+            if announce {
+                let dropped = !a.args.is_empty() || a.command.is_some();
+                let gained = default_args(kind);
+                println!(
+                    "  role `{role}`: {} -> {kind}{}{}",
+                    a.kind,
+                    if dropped { ", dropping args written for it" } else { "" },
+                    if gained.is_empty() { String::new() } else { format!(", using {}", gained.join(" ")) }
+                );
+            }
             a.kind = kind.to_string();
             a.args = default_args(kind);
             a.command = None;
@@ -2000,7 +2043,7 @@ fn agent_role(cfg: &mut Config, spec: Option<String>) -> Result<String> {
     // than every role, since only one of them is about to run.
     let spec = if spec.contains('=') { spec } else { format!("{default}={spec}") };
     let role = spec.split('=').next().unwrap_or(&default).to_string();
-    override_agents(cfg, &[spec])?;
+    override_agents(cfg, &[spec], true)?;
     Ok(role)
 }
 
@@ -2022,6 +2065,50 @@ fn pipeline_steps(
         steps.retain(|s| s.feature.as_deref().is_none_or(|f| !off.contains(&f)));
     }
     Ok(steps)
+}
+
+/// One line per step: what it is, which role runs it, and on what.
+///
+/// The model is the reason this exists rather than a list of ids: `kind` is
+/// rigg's setting and the model is the agent's own, so the two together are
+/// what actually answers "what is about to run this".
+fn plan_text(cfg: &Config, root: &std::path::Path, steps: &[config::Step]) -> String {
+    let width = |f: &dyn Fn(&config::Step) -> usize| steps.iter().map(f).max().unwrap_or(0);
+    let idw = width(&|s: &config::Step| s.id.len());
+    let rolew = width(&|s: &config::Step| role_of(s).len());
+    let mut out = String::new();
+    for (i, step) in steps.iter().enumerate() {
+        let runner = match &step.agent {
+            Some(role) => {
+                let a = &cfg.agents[role];
+                format!("  {} {}", a.kind, model::model_for(a, root))
+            }
+            None => String::new(),
+        };
+        // Whether a step runs at all can depend on the diff, which does not
+        // exist yet - so say so rather than promise it.
+        let only = match &step.when_changed {
+            Some(globs) => format!("  only if {} changed", globs.join(", ")),
+            None => String::new(),
+        };
+        // Left-aligned, so the first line has no leading space for a reader
+        // that trims one - the Slack bridge does, and it would take the
+        // whole listing out of column.
+        let line = format!(
+            "{:<2}  {:<idw$}  {:<rolew$}{runner}{only}",
+            i + 1,
+            step.id,
+            role_of(step),
+        );
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A step's role, or what runs it when it has none.
+fn role_of(step: &config::Step) -> &str {
+    step.agent.as_deref().unwrap_or("shell")
 }
 
 /// Which pipeline a branch last ran, from the header of its log.
@@ -2272,7 +2359,7 @@ struct RunOpts {
 /// Load the config, pick the pipeline and run it against `root`.
 fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result<()> {
     let mut cfg = Config::load(root, cfg_path)?;
-    override_agents(&mut cfg, &o.agents)?;
+    override_agents(&mut cfg, &o.agents, true)?;
     let branch = util::current_branch(root)?;
     let st = Stacks::load(root)?;
     let base = o
@@ -2280,12 +2367,13 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
         .or_else(|| st.find(&branch).map(|e| e.base.clone()))
         .unwrap_or_else(|| cfg.stack.trunk.clone());
 
-    let mut steps = pipeline_steps(
+    let whole = pipeline_steps(
         &cfg, o.pipeline.as_deref(), &o.with_features, &o.without_features,
     )?;
-    if steps.is_empty() {
+    if whole.is_empty() {
         bail!("pipeline has no steps");
     }
+    let mut steps = whole.clone();
     if let Some(from) = &o.from {
         let idx = steps
             .iter()
@@ -2365,6 +2453,15 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     let push_when_done = cfg.stack.push_when_done;
     let trunk = cfg.stack.trunk.clone();
     let mut runner = pipeline::Runner::new(root.to_path_buf(), cfg, vars, o.dry_run);
+    // Number what runs against the whole pipeline, not against the slice.
+    // A `continue` that reports `[1/2] wait-copilot` reads as a fresh run of
+    // something else; `[8/9]` is a place in the plan the branch started with.
+    // Ids are unique within a pipeline, which is what makes this exact.
+    runner.numbers = steps
+        .iter()
+        .filter_map(|s| whole.iter().position(|w| w.id == s.id).map(|i| i + 1))
+        .collect();
+    runner.total = whole.len();
     let mut outcome = runner.run(&steps);
 
     // Whatever the run left in the checkout is committed and pushed. A branch

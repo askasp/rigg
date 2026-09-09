@@ -63,6 +63,14 @@ pub fn command_for(
     // Without something like `--permission-mode acceptEdits`, a headless agent
     // will describe the change it would make and edit nothing.
     argv.extend(cfg.args.iter().cloned());
+    // claude's `--allowedTools`, `--disallowedTools` and `--mcp-config` are
+    // variadic, so a role whose args end with one eats the prompt appended here
+    // as one more value - and then reports having been given no prompt at all,
+    // which reads as a broken agent rather than a misordered flag. `--` ends
+    // option parsing; the prompt after it is the prompt whatever precedes it.
+    if cfg.kind == "claude" {
+        argv.push("--".into());
+    }
     argv.push(prompt.to_string());
     argv
 }
@@ -165,5 +173,34 @@ fn report(ev: &serde_json::Value) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AgentCfg;
+
+    fn cfg(kind: &str, args: &[&str]) -> AgentCfg {
+        AgentCfg {
+            kind: kind.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            command: None,
+        }
+    }
+
+    #[test]
+    fn prompt_survives_a_variadic_flag_at_the_end() {
+        let argv = command_for(&cfg("claude", &["--allowedTools", "mcp__front"]), "do it", false, None);
+        let dashes = argv.iter().position(|a| a == "--").expect("no -- before the prompt");
+        assert_eq!(argv.last().unwrap(), "do it");
+        assert!(dashes == argv.len() - 2, "{argv:?}");
+    }
+
+    #[test]
+    fn other_agents_are_left_alone() {
+        let argv = command_for(&cfg("opencode", &[]), "do it", false, None);
+        assert!(!argv.iter().any(|a| a == "--"), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "do it");
     }
 }

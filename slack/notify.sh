@@ -19,15 +19,24 @@ API="${SLACK_API_URL:-https://slack.com/api/chat.postMessage}"
 
 common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
 state="$common/rigg/slack/${RIGG_BRANCH//\//-}.json"
-[ -f "$state" ] || exit 0
 
-channel=$(jq -r '.channel // empty' "$state")
-thread=$(jq -r '.thread_ts // empty' "$state")
-[ -n "$channel" ] && [ -n "$thread" ] || exit 0
+channel=""
+thread=""
+if [ -f "$state" ]; then
+  channel=$(jq -r '.channel // empty' "$state")
+  thread=$(jq -r '.thread_ts // empty' "$state")
+fi
+
+# A run nobody started from Slack - a timer, or one started in a terminal - has
+# no thread to reply in, and used to report nowhere at all. Name a channel and
+# it reports there instead, as a new message.
+[ -n "$channel" ] || channel="${RIGG_NOTIFY_CHANNEL:-}"
+[ -n "$channel" ] || exit 0
 
 # A failing post must not fail the run, so every error here is swallowed.
 curl -sf -X POST "$API" \
   -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
   -H 'Content-type: application/json; charset=utf-8' \
   --data "$(jq -n --arg c "$channel" --arg t "$thread" --arg x "${RIGG_MESSAGE:-}" \
-           '{channel:$c, thread_ts:$t, text:$x}')" >/dev/null 2>&1 || true
+           '{channel:$c, text:$x} + (if $t == "" then {} else {thread_ts:$t} end)')" \
+  >/dev/null 2>&1 || true

@@ -17,6 +17,17 @@ pub struct Runner {
     /// The id of the step last attempted, so a caller can record where the
     /// run got to without having to read its own log back.
     pub at: Option<String>,
+    /// Where these steps sit in the pipeline they were cut from, 1-based, so a
+    /// run picking up in the middle still reports `[8/9]` - the number a
+    /// reader can find in the plan they were given when the branch started.
+    /// Empty means these are the whole pipeline.
+    pub numbers: Vec<usize>,
+    /// How many steps that pipeline has. 0 means the same.
+    pub total: usize,
+    /// Whether to tell the notify hook about this run. Off for a single turn
+    /// asked for by hand: a `say` is not a pipeline, and reporting it as
+    /// "1 step(s)" three times says nothing and loses where the branch is.
+    pub announce: bool,
 }
 
 impl Runner {
@@ -33,6 +44,9 @@ impl Runner {
             dry_run,
             session: None,
             at: None,
+            numbers: Vec::new(),
+            total: 0,
+            announce: true,
         }
     }
 
@@ -44,7 +58,7 @@ impl Runner {
         let Some(cmd) = self.cfg.notify.command.clone() else {
             return;
         };
-        if self.dry_run {
+        if self.dry_run || !self.announce {
             return;
         }
         let mut env: Vec<(&str, String)> = vec![
@@ -133,17 +147,29 @@ impl Runner {
     }
 
     pub fn run(&mut self, steps: &[Step]) -> Result<()> {
-        let total = steps.len();
+        let count = steps.len();
+        let total = if self.total > 0 { self.total } else { count };
+        // Which step of the pipeline each of these is. A whole run numbers
+        // itself; a resumed one was told.
+        let number: Vec<usize> = (0..count)
+            .map(|i| self.numbers.get(i).copied().unwrap_or(i + 1))
+            .collect();
         let started = std::time::Instant::now();
         let branch = self.var("branch");
         self.notify(
             "start",
-            &format!("*{branch}* started - {total} step(s)"),
+            &match steps.first() {
+                Some(s) if count < total => format!(
+                    "*{branch}* picking up at [{}/{total}] `{}` - {count} step(s) left",
+                    number[0], s.id
+                ),
+                _ => format!("*{branch}* started - {total} step(s)"),
+            },
             &[("RIGG_TOTAL", total.to_string())],
         );
         for (i, step) in steps.iter().enumerate() {
             let label = step.description.clone().unwrap_or_else(|| step.id.clone());
-            let head = format!("[{}/{}] {}", i + 1, total, label);
+            let head = format!("[{}/{}] {}", number[i], total, label);
             // A rule per step, so the boundaries stay findable once the agent
             // output is streaming past.
             println!("\n{:-<4} {head} {:-<width$} {}", "", "", clock(),
@@ -163,12 +189,12 @@ impl Runner {
             let took = || elapsed(step_started);
             let mut at = vec![
                 ("RIGG_STEP", step.id.clone()),
-                ("RIGG_INDEX", (i + 1).to_string()),
+                ("RIGG_INDEX", number[i].to_string()),
                 ("RIGG_TOTAL", total.to_string()),
             ];
             let outcome = self.run_step(step);
             at.push(("RIGG_ELAPSED", took()));
-            let head = format!("*{branch}* [{}/{total}] `{}`", i + 1, step.id);
+            let head = format!("*{branch}* [{}/{total}] `{}`", number[i], step.id);
 
             match outcome {
                 Ok(()) => {
@@ -196,7 +222,14 @@ impl Runner {
         println!("\ntotal {}", elapsed(started));
         self.notify(
             "done",
-            &format!("*{branch}* finished - {total} step(s) in {}", elapsed(started)),
+            &if count < total {
+                format!(
+                    "*{branch}* finished - {count} of {total} step(s) in {}",
+                    elapsed(started)
+                )
+            } else {
+                format!("*{branch}* finished - {total} step(s) in {}", elapsed(started))
+            },
             &[("RIGG_TOTAL", total.to_string()), ("RIGG_ELAPSED", elapsed(started))],
         );
         Ok(())
