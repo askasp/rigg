@@ -3779,11 +3779,15 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
         CronCmd::List { channel } => {
             let mut jobs = cron::load()?;
             if let Some(want) = &channel {
-                // The bridge asks per channel: a listing in #julies-rigg that
-                // showed everyone's jobs would invite editing someone else's.
+                // The bridge asks per channel, so a listing in #julies-rigg
+                // does not invite editing #carls-rigg's jobs. A job that names
+                // no channel reports to the instance default and belongs to
+                // nobody in particular - hiding it from every listing is how
+                // it becomes invisible, so it is shown everywhere instead.
                 let want = want.trim_start_matches('#');
-                jobs.retain(|j| {
-                    j.channel.as_deref().map(|c| c.trim_start_matches('#')) == Some(want)
+                jobs.retain(|j| match j.channel.as_deref() {
+                    Some(c) => c.trim_start_matches('#') == want,
+                    None => true,
                 });
             }
             println!("instance {}  {}", instance::name(), instance::cron_path().display());
@@ -3809,7 +3813,11 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
                 };
                 let next = if j.paused { "paused".to_string() } else { next };
                 let mark = if j.declared() { " ·" } else { "  " };
-                println!("{mark} {:<22} {:<16} {:<18} {}", j.id, j.schedule, next, j.describe());
+                let where_to = match (&channel, &j.channel) {
+                    (Some(_), None) => "  (instance default channel)",
+                    _ => "",
+                };
+                println!("{mark} {:<22} {:<16} {:<18} {}{where_to}", j.id, j.schedule, next, j.describe());
                 if let (Some(r), Some(st)) = (&j.last_run, &j.last_status) {
                     println!("  {:<20} last {r}  {st}{}", "", j.last_detail.as_deref().map(|d| format!("  {d}")).unwrap_or_default());
                 }

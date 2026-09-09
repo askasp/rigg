@@ -89,6 +89,10 @@ run('add "0 7 * * *" --task "draft replies to anything unanswered"', r)
 check("a quoted task survives as one argument",
       "draft replies to anything unanswered" in r.calls[0], str(r.calls))
 
+r = Rigg()
+run("export adhoc", r)
+check("export passes through too", r.calls == [["cron", "export", "adhoc"]], str(r.calls))
+
 # --- what comes back --------------------------------------------------------
 
 said = run("list", Rigg(out="  morning-mail  0 7 * * *"))
