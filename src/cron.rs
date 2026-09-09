@@ -394,6 +394,33 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// Removes the lock file when the tick ends, however it ends.
+pub struct TickLock(std::path::PathBuf);
+
+impl Drop for TickLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// One tick per instance. Cron will knock again in a minute either way, so a
+/// tick that finds another in flight says nothing and leaves.
+fn hold_tick() -> Result<Option<TickLock>> {
+    let path = instance::dir().join("tick.pid");
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(pid) = text.trim().parse::<u32>() {
+            if alive(pid) {
+                return Ok(None);
+            }
+        }
+    }
+    std::fs::write(&path, std::process::id().to_string())?;
+    Ok(Some(TickLock(path)))
+}
+
 pub struct Fired {
     pub id: String,
     pub why: String,
@@ -401,6 +428,20 @@ pub struct Fired {
 
 /// One knock.
 pub fn tick(at: Option<&str>, dry_run: bool) -> Result<Vec<Fired>> {
+    let _lock = if dry_run {
+        None
+    } else {
+        match hold_tick()? {
+            Some(l) => Some(l),
+            // Cron knocks again in a minute either way.
+            None => {
+                return Ok(vec![Fired {
+                    id: "tick".into(),
+                    why: "another tick is still going".into(),
+                }])
+            }
+        }
+    };
     let when = now(at)?;
     let mut jobs = load()?;
     let mut fired = Vec::new();
@@ -496,6 +537,16 @@ fn spawn_runner(job: &Job) -> Result<u32> {
 pub fn run_job(id: &str, fired: bool) -> Result<()> {
     let jobs = load()?;
     let job = find(&jobs, id)?.clone();
+    // setsid usually execs in place, so its pid is the job's - but it forks
+    // when it is already a group leader, and then the pid the tick recorded
+    // dies immediately and the overlap guard stops guarding. Record our own.
+    {
+        let mut jobs = load()?;
+        if let Some(j) = jobs.iter_mut().find(|j| j.id == job.id) {
+            j.pid = Some(std::process::id());
+        }
+        save(&jobs)?;
+    }
     let exe = std::env::current_exe().context("finding the rigg binary")?;
     let argv = job.argv();
     println!("rigg {}", argv.join(" "));
