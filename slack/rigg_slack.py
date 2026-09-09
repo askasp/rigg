@@ -1406,8 +1406,9 @@ COMMANDS = {
     "remove": cmd_rm,
 }
 
-# Recurring jobs live in their own module; it needs the pipeline list to refuse
-# a job that could never run, and rigg itself to run one.
+# `cron` is a verb like any other now: it hands the words to `rigg cron` and
+# renders what comes back. rigg owns the schedules and `rigg tick` fires them,
+# so there is no scheduler in this process.
 COMMANDS["cron"] = functools.partial(
     cron.command, pipelines=pipelines, run_rigg=run_rigg,
     split_modifiers=split_modifiers, features=features,
@@ -1536,7 +1537,6 @@ def main() -> int:
     def post(channel: str, text: str):
         return app.client.chat_postMessage(channel=channel, text=text)
 
-    cron.Scheduler(run_rigg=run_rigg, post=post).start()
 
     # And the corpora those jobs draft from. A corpus nobody is keeping current
     # is the failure that looks like the agent inventing last year's price.

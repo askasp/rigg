@@ -455,7 +455,11 @@ enum CronCmd {
     /// Print the job ids, one per line, for shell completion.
     Names,
     /// List them.
-    List,
+    List {
+        /// Only jobs that report to this channel.
+        #[arg(long)]
+        channel: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3577,7 +3581,7 @@ fn slug(text: &str) -> String {
 }
 
 fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
-    match cmd.unwrap_or(CronCmd::List) {
+    match cmd.unwrap_or(CronCmd::List { channel: None }) {
         CronCmd::Add { words, pipeline, task, new, repo, vars, channel, id } => {
             let (schedule, typed) = split_schedule(&words)?;
             let expr = cron::Expr::parse(&schedule)?;
@@ -3772,11 +3776,24 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
                 println!("{}", j.id);
             }
         }
-        CronCmd::List => {
-            let jobs = cron::load()?;
+        CronCmd::List { channel } => {
+            let mut jobs = cron::load()?;
+            if let Some(want) = &channel {
+                // The bridge asks per channel: a listing in #julies-rigg that
+                // showed everyone's jobs would invite editing someone else's.
+                let want = want.trim_start_matches('#');
+                jobs.retain(|j| {
+                    j.channel.as_deref().map(|c| c.trim_start_matches('#')) == Some(want)
+                });
+            }
             println!("instance {}  {}", instance::name(), instance::cron_path().display());
             if jobs.is_empty() {
-                println!("\nnothing scheduled:  rigg cron add \"0 7 * * *\" --pipeline morning-mail");
+                match &channel {
+                    Some(c) => println!("\nnothing scheduled for {c}"),
+                    None => println!(
+                        "\nnothing scheduled:  rigg cron add \"0 7 * * *\" --pipeline morning-mail"
+                    ),
+                }
                 return Ok(());
             }
             let now = cron::now(None)?;
