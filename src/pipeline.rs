@@ -74,6 +74,21 @@ impl Runner {
         }
     }
 
+    /// Put every pipeline var in the environment as `RIGG_VAR_<NAME>`.
+    ///
+    /// A sidecar or an MCP server a step starts is a separate process with no
+    /// idea what `--var inbox=...` was, and the only channel it already reads
+    /// is the environment.
+    fn export_vars(&self) {
+        for (k, v) in &self.vars {
+            let name: String = k
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                .collect();
+            std::env::set_var(format!("RIGG_VAR_{name}"), v);
+        }
+    }
+
     fn var(&self, key: &str) -> String {
         self.vars.get(key).cloned().unwrap_or_default()
     }
@@ -152,6 +167,7 @@ impl Runner {
     }
 
     pub fn run(&mut self, steps: &[Step]) -> Result<()> {
+        self.export_vars();
         let count = steps.len();
         let total = if self.total > 0 { self.total } else { count };
         // Which step of the pipeline each of these is. A whole run numbers

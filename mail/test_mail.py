@@ -245,6 +245,32 @@ try:
 except Exception as e:
     check("an unsigned draft is refused", "unsigned" in str(e))
 
+# --- an inbox scope ---------------------------------------------------------
+
+db.execute("INSERT OR REPLACE INTO conversation_inbox VALUES(?,?,?)",
+          ("c1", "inb_a", "Aksels inbox"))
+db.commit()
+
+check("no scope set means every inbox", corpus.scope() is None)
+check("everything is in scope when there is none", corpus.in_scope(db, "c1"))
+
+os.environ["RIGG_VAR_INBOX"] = "Aksels inbox"
+check("a pipeline var is the scope", corpus.scope() == "Aksels inbox")
+check("a conversation in the scoped inbox is reachable", corpus.in_scope(db, "c1"))
+check("one in another inbox is not", not corpus.in_scope(db, "c-elsewhere"))
+check("an id works as well as a name",
+      corpus.in_scope(db, "c1") and (os.environ.__setitem__("RIGG_VAR_INBOX", "inb_a")
+                                    or corpus.in_scope(db, "c1")))
+
+os.environ["RIGG_VAR_INBOX"] = "Aksels inbox"
+scoped = corpus.search(db, "blodprøve", limit=50)
+os.environ["RIGG_VAR_INBOX"] = "Somebody elses inbox"
+elsewhere = corpus.search(db, "blodprøve", limit=50)
+check("a search only returns the scoped inbox",
+      len(elsewhere) == 0 and len(scoped) >= 0, f"{len(scoped)} vs {len(elsewhere)}")
+os.environ.pop("RIGG_VAR_INBOX")
+check("dropping the scope restores every inbox", corpus.scope() is None)
+
 # --- a dropped connection is retried, not fatal ------------------------------
 
 import requests  # noqa: E402

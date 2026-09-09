@@ -378,13 +378,15 @@ def recent(db, hours: float) -> str:
         "         WHERE c.conversation_id = m.conversation_id) AS inbox"
         "  FROM messages m"
         " WHERE m.is_inbound = 1 AND m.created_at > ?"
-        " ORDER BY m.created_at",
-        (cutoff,),
+        + corpus.scope_sql("m")[0]
+        + " ORDER BY m.created_at",
+        [cutoff] + corpus.scope_sql("m")[1],
     ).fetchall()
+    where = f" in {corpus.scope()}" if corpus.scope() else ""
     if not rows:
-        return f"No mail arrived in the last {hours:g} hours."
+        return f"No mail arrived{where} in the last {hours:g} hours."
 
-    out = [f"{len(rows)} message(s) in the last {hours:g} hours.", ""]
+    out = [f"{len(rows)} message(s){where} in the last {hours:g} hours.", ""]
     for r in rows:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created_at"]))
         state = "answered" if r["replies"] else "UNANSWERED"
@@ -413,7 +415,10 @@ def backfill(db, front: Front, since: float | None) -> None:
     """
     started = time.time()
     seen = 0
+    want = corpus.scope()
     for inbox in front.paged("/inboxes"):
+        if want and want not in (inbox.get("name"), inbox.get("id")):
+            continue
         print(f"inbox {inbox.get('name')}", file=sys.stderr)
         for conv in front.paged(f"/inboxes/{inbox['id']}/conversations"):
             created = conv.get("created_at") or 0
@@ -426,6 +431,8 @@ def backfill(db, front: Front, since: float | None) -> None:
             if seen % 25 == 0:
                 db.commit()
                 print(f"  {seen} conversations", file=sys.stderr)
+    if want and not seen:
+        print(f"no inbox called {want!r}", file=sys.stderr)
     corpus.set_state(db, "events_after", str(started - WATERMARK_OVERLAP))
     db.commit()
     print(f"backfilled {seen} conversations", file=sys.stderr)
@@ -460,6 +467,9 @@ def incremental(db, front: Front) -> None:
             touched[conv["id"]] = conv
         high = max(high, ev.get("emitted_at") or 0)
     for cid, conv in touched.items():
+        # An event names a conversation, not an inbox, so the filter is on
+        # what we already know about it. One we have never seen is ingested
+        # and filtered on read.
         ingest(db, front, cid, conv.get("subject"), None)
     # Only after every touched conversation is committed, or a crash halfway
     # would leave a gap no later run goes back for.
@@ -479,9 +489,12 @@ def main() -> int:
         "--list", action="store_true",
         help="print recent inbound mail instead of syncing, for a digest to read",
     )
+    ap.add_argument("--inbox", help="only this Front inbox, by name or id")
     ap.add_argument("--since-hours", type=float, default=24.0,
                     help="how far back --list reaches. Default 24")
     args = ap.parse_args()
+    if args.inbox:
+        os.environ["RIGG_VAR_INBOX"] = args.inbox
 
     db = corpus.connect(corpus.db_path())
 

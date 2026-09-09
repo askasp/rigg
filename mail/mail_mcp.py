@@ -62,6 +62,11 @@ def get_thread(conversation_id: str) -> list[dict]:
     Args:
         conversation_id: A Front conversation id, as returned by search_replies.
     """
+    if not corpus.in_scope(DB, conversation_id):
+        raise ToolError(
+            f"{conversation_id} is not in {corpus.scope()}, which is the only "
+            "inbox this run may read"
+        )
     rows = DB.execute(
         "SELECT is_inbound, author_email, created_at, subject, clean_text"
         " FROM messages WHERE conversation_id = ? ORDER BY created_at",

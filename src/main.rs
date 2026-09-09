@@ -3739,6 +3739,33 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
         }
     }
 
+    if let Ok(c) = &cfg {
+        for (name, a) in &c.approvals {
+            let label = format!("approval {name}");
+            let missing: Vec<&String> = a
+                .needs
+                .iter()
+                .filter(|n| {
+                    !have.get(*n).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                        && !instance::set_in_env(n)
+                })
+                .collect();
+            if a.run.is_none() {
+                println!("{label:<14} no `run` - approving it does nothing");
+                problems += 1;
+            } else if missing.is_empty() {
+                println!("{label:<14} ready");
+            } else {
+                // Not a problem: a dry run is the designed behaviour, and
+                // saying so beforehand is the point of declaring `needs`.
+                println!(
+                    "{label:<14} dry run - {} not set",
+                    missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+    }
+
     if which("gh") {
         println!("gh             found");
     } else {

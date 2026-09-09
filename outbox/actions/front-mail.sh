@@ -8,9 +8,24 @@
 # FRONT_AUTHOR_ID is in `needs` rather than defaulted: a message attributed to
 # the API token arrives from nobody.
 set -euo pipefail
+here="$(cd "$(dirname "$0")/../.." && pwd)"
 
 cid="${RIGG_APPROVAL_CONVERSATION_ID:?no conversation id on the approval}"
 body="$(cat)"
+
+# Refuse to reply outside the inbox this run was scoped to. The draft was
+# written from what that scope could see, so sending it elsewhere is a reply
+# in the wrong voice at best and to the wrong customer at worst.
+if [ -n "${RIGG_VAR_INBOX:-}" ]; then
+  CID="$cid" MAILDIR="$here/mail" uv run --quiet python -c '
+import os, sys
+sys.path.insert(0, os.environ["MAILDIR"])
+import corpus
+cid = os.environ["CID"]
+if not corpus.in_scope(corpus.connect(corpus.db_path()), cid):
+    sys.exit(cid + " is not in the scoped inbox " + str(corpus.scope()))
+'
+fi
 
 payload=$(BODY="$body" AUTHOR="$FRONT_AUTHOR_ID" python3 -c '
 import json, os

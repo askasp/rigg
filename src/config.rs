@@ -34,10 +34,30 @@ pub struct Config {
     /// something you can read rather than infer.
     #[serde(default)]
     pub features: BTreeMap<String, bool>,
+    /// What a person may approve in Slack, and what runs when they do. rigg
+    /// never executes these - the outbox does - but they are repo config, so
+    /// they are typed here and `rigg doctor` can say which are ready.
+    #[serde(default)]
+    pub approvals: BTreeMap<String, Approval>,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The command. The draft arrives on its stdin, the proposal's fields as
+    /// RIGG_APPROVAL_*.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Secrets it cannot run without. Missing ones make it a dry run rather
+    /// than a failure after somebody has clicked.
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

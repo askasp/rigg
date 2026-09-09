@@ -94,6 +94,29 @@ def instance() -> str:
     return os.environ.get("RIGG_INSTANCE") or "default"
 
 
+def scope() -> str | None:
+    """Which Front inbox this run may see. None means every one.
+
+    A pipeline var reaches a step as RIGG_VAR_<NAME>, so `--var inbox="..."`
+    on a cron scopes that job and nothing else.
+    """
+    v = os.environ.get("RIGG_VAR_INBOX", "").strip()
+    return v or None
+
+
+def scope_sql(alias: str = "p") -> tuple[str, list]:
+    """A WHERE fragment restricting to the scoped inbox, and its parameters."""
+    inbox = scope()
+    if not inbox:
+        return "", []
+    return (
+        f" AND {alias}.conversation_id IN"
+        " (SELECT conversation_id FROM conversation_inbox"
+        "   WHERE inbox_name = ? OR inbox_id = ?)",
+        [inbox, inbox],
+    )
+
+
 def db_path(inst: str | None = None) -> Path:
     root = Path(os.environ.get("RIGG_MAIL_DIR") or (Path.home() / ".rigg" / "mail"))
     return root / f"{inst or instance()}.db"
@@ -161,13 +184,15 @@ def search(db: sqlite3.Connection, question: str, limit: int = 5,
     which exists to show what that agent will be shown. Two rankings would
     make the second one a lie the first time either was tuned.
     """
+    where, params = scope_sql("p")
     rows = db.execute(
         "SELECT p.*, bm25(pairs_fts, 1.0, 2.0) AS bm"
         " FROM pairs_fts JOIN pairs p ON p.rowid = pairs_fts.rowid"
         " WHERE pairs_fts MATCH ?"
         + (" AND p.author_email = ?" if author else "")
+        + where
         + " ORDER BY bm LIMIT ?",
-        ([fts_query(question)] + ([author] if author else []) + [CANDIDATES]),
+        ([fts_query(question)] + ([author] if author else []) + params + [CANDIDATES]),
     ).fetchall()
 
     now = time.time()
@@ -198,3 +223,16 @@ def search(db: sqlite3.Connection, question: str, limit: int = 5,
         }
         for _, r in scored[: max(1, min(limit, 25))]
     ]
+
+
+def in_scope(db: sqlite3.Connection, conversation_id: str) -> bool:
+    """Whether a conversation is one this run may touch."""
+    inbox = scope()
+    if not inbox:
+        return True
+    row = db.execute(
+        "SELECT 1 FROM conversation_inbox"
+        " WHERE conversation_id = ? AND (inbox_name = ? OR inbox_id = ?)",
+        (conversation_id, inbox, inbox),
+    ).fetchone()
+    return row is not None
