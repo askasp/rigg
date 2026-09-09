@@ -515,6 +515,21 @@ continue_on_error = true
 output can be fed straight into a later prompt - that is how PR review comments
 reach the agent.
 
+`when = "{{name}}"` runs a step only when that renders to something, which is
+how a shell step decides whether the agent step after it is worth a turn:
+
+```toml
+[[steps]]
+id = "poll"
+run = "./outbox/run.sh"
+capture = "redrafts"      # prints nothing when there is nothing to do
+
+[[steps]]
+id = "redraft"
+agent = "triager"
+when = "{{redrafts}}"     # so a quiet poll costs no turn
+```
+
 Other step keys: `when_changed` (globs — used for frontend-only steps),
 `confirm`, `description`.
 
@@ -820,30 +835,99 @@ that channel instead.
 
 Giving an agent a body of past work to draft from needs nothing rigg does not
 already have. Ingest is a shell step on a schedule; search is a tool a role
-holds. `mail/` is the sidecar that knows about Front and SQLite — rigg knows
-only which directory belongs to this instance, which it passes as
-`RIGG_MAIL_DIR`.
+holds. rigg holds no list of corpus kinds — a sidecar is a directory with a
+`corpus.toml` saying how to run it, which secret it needs and what its tools
+are called:
 
 ```toml
-[[pipelines.corpus-sync.steps]]
-id = "sync"
-run = "/path/to/rigg/mail/run.sh"
-
-[[pipelines.mail-draft.steps]]
-id = "draft"
-agent = "mailer"
-clear = true
-prompt = "{{task}}\n\nUse mcp__mail__search_replies to find how questions like this were answered before."
+# mail/corpus.toml
+name = "mail"
+description = "Front conversations, paired inbound question to human reply."
+mcp_command = "mcp.sh"
+sync_command = "run.sh"
+backfill_command = "run.sh --backfill --since {{since}}"
+needs = ["FRONT_API_TOKEN"]
+sync_schedule = "*/15 * * * *"
+db = "default.db"
 ```
 
 ```sh
-rigg cron add "*/15 * * * *" --pipeline corpus-sync
-rigg run --pipeline mail-draft --task "reply to the HRV question"
+rigg corpus                       # what is available, and what is wired in here
+rigg corpus enable mail           # writes .rigg/mcp/mail.json and the pipelines
+rigg corpus enable mail --dry-run # exactly what it would write
+rigg corpus status                # wired in? token present? how old is the data?
 ```
 
-So there is no corpus registry to keep in step with reality and nothing
-long-lived to keep it fresh — the schedule already does that, and `rigg doctor`
-stats the file. See [`mail/`](mail/README.md) for what it ingests.
+`enable` leaves everything uncommitted, to be read before it is committed —
+capability stays capability, you just stop typing it. It writes the role (with
+its `needs`), a `<name>-sync` and `<name>-backfill` pipeline, and a `<name>-ask`
+pipeline from the prompt the sidecar suggests. Then:
+
+```sh
+rigg secret set FRONT_API_TOKEN ...
+rigg run --pipeline mail-backfill --var since=2026-05-01
+rigg cron add "*/15 * * * *" --pipeline mail-sync
+rigg run --pipeline mail-ask --task "how long do blood test results take?"
+```
+
+Sidecars are found on `RIGG_CORPUS_PATH`, defaulting to rigg's own checkout. A
+new kind is a new directory, not a change to rigg — which is what the registry
+this replaced could never do, since its kinds were hardcoded and chat could
+only turn on one somebody had already written.
+
+## Waiting for a person
+
+A run that drafts a customer reply overnight needs something between the draft
+and the customer. `outbox/` is that something: it posts a proposal to Slack and
+holds it until a person answers.
+
+```
+:+1:                  send this draft
+reply with anything   feedback — the agent redrafts, and waits again
+reply `send: ...`     send those words instead
+:x:                   drop it
+```
+
+A plain reply is feedback, never an instruction to send. The other way round
+sends a half-written sentence to a customer, and mail has no undo — so the two
+things that do send are both explicit, and the safe reading is the default.
+
+Sending is not an MCP tool. It happens in the poll, after a person has said so,
+where no prompt can reach it, and it is mocked unless `FRONT_SEND=1` with both
+a token and a `FRONT_AUTHOR_ID` — a send attributed to the API token arrives
+unsigned.
+
+```toml
+[[pipelines.mail-triage.steps]]     # 07:00: read, sort, propose
+id = "fetch"
+run = "./mail/run.sh --list --since-hours {{hours}}"
+capture = "inbox"
+
+[[pipelines.mail-triage.steps]]
+id = "triage"
+agent = "triager"
+prompt_file = "triage.md"
+
+[[pipelines.mail-outbox.steps]]     # every two minutes: act on the answers
+id = "poll"
+run = "./outbox/run.sh"
+capture = "redrafts"
+
+[[pipelines.mail-outbox.steps]]
+id = "redraft"
+agent = "triager"
+when = "{{redrafts}}"
+prompt_file = "redraft.md"
+```
+
+```sh
+rigg cron add "0 7 * * *"   --pipeline mail-triage
+rigg cron add "*/2 * * * *" --pipeline mail-outbox
+```
+
+Proposals live in `~/.rigg/instances/<inst>/outbox.json`, beside the schedules
+and the tokens, because a proposal outlives the run that made it. See
+[`mail/`](mail/README.md) for what the corpus ingests.
 
 ## Things worth knowing
 
