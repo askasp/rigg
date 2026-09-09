@@ -40,9 +40,15 @@ def resolve_one(item: dict) -> tuple[str, dict]:
         return action, item
     if action in ("send", "verbatim"):
         text = payload if action == "verbatim" else item["draft"]
-        it = outbox.send(item, text)
+        try:
+            it = outbox.execute(item, text)
+        except RuntimeError as e:
+            outbox.post(f"Could not do it: {e}", thread_ts=item["ts"], ch=item["channel"])
+            outbox.update(item["id"], seen_ts=high)
+            return "error", item
         outbox.update(item["id"], seen_ts=high)
-        how = "Sent." if not it["mocked"] else "Would have sent this (no send token):"
+        how = ("Done." if not it["mocked"]
+               else f"Would have done this, but {it['mocked']}:")
         outbox.post(f"{how}\n\n{text}", thread_ts=item["ts"], ch=item["channel"])
         return action, it
     if action == "feedback":
@@ -64,7 +70,7 @@ def main() -> int:
             print("nothing waiting")
             return 0
         for i in waiting:
-            print(f"{i['id']}  {i['status']:<8} {i['subject'][:60]}  {i['conversation_id']}")
+            print(f"{i['id']}  {i['status']:<8} {i['action']:<12} {i['title'][:50]}  {i['key']}")
         return 0
 
     if not waiting:
@@ -92,7 +98,7 @@ def main() -> int:
     for item in outbox.load():
         if item["status"] != "redraft":
             continue
-        print(f"--- {item['id']}  {item['subject']}  ({item['conversation_id']})")
+        print(f"--- {item['id']}  {item['title']}  ({item['action']} / {item['key']})")
         print(f"they said: {item['feedback']}")
         print("current draft:")
         print(item["draft"])

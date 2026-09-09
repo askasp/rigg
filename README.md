@@ -892,10 +892,25 @@ A plain reply is feedback, never an instruction to send. The other way round
 sends a half-written sentence to a customer, and mail has no undo — so the two
 things that do send are both explicit, and the safe reading is the default.
 
-Sending is not an MCP tool. It happens in the poll, after a person has said so,
-where no prompt can reach it, and it is mocked unless `FRONT_SEND=1` with both
-a token and a `FRONT_AUTHOR_ID` — a send attributed to the API token arrives
-unsigned.
+What happens on approval is repo config, not code. An action is a command; the
+draft arrives on its stdin and the proposal's fields as `RIGG_APPROVAL_*`:
+
+```toml
+[approvals.front-mail]
+description = "Reply to a Front conversation"
+run = "/path/to/rigg/outbox/actions/front-mail.sh"
+needs = ["FRONT_API_TOKEN", "FRONT_AUTHOR_ID"]
+```
+
+So a second flow — a PR comment, a refund, a booking — is a block in this file
+and a script, with no change to rigg and none to the outbox. `needs` is the
+same seam `rigg doctor` reads: an action whose secrets are not all set is
+mocked to a log and says which one is missing, in the thread, rather than
+failing after someone has clicked.
+
+Executing is not an MCP tool. It happens in the poll, after a person has said
+so, where no prompt can reach it. `FRONT_AUTHOR_ID` is in `needs` rather than
+defaulted because a message attributed to the API token arrives from nobody.
 
 ```toml
 [[pipelines.mail-triage.steps]]     # 07:00: read, sort, propose

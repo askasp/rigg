@@ -20,18 +20,32 @@ import outbox  # noqa: E402
 mcp = MCPServer("rigg-outbox")
 
 
-def propose_reply(conversation_id: str, subject: str, sender: str, draft: str,
-                  why: str = "") -> str:
-    """Post a mail and a suggested reply to Slack, and wait for a person.
+def propose(action: str, key: str, title: str, draft: str, why: str = "",
+            subtitle: str = "", params: dict | None = None) -> str:
+    """Post something to Slack for a person to approve.
 
-    conversation_id is the `id:` from the inbox listing. `why` is one line on
-    why this one is safe to answer from a template.
+    action  which [approvals.*] runs on approval - `approvals()` lists them
+    key     what makes it idempotent, e.g. a conversation id
+    title   the bold line in Slack
+    draft   the text a person approves
+    why     one line on the precedent you are leaning on
+    params  fields the action needs, e.g. {"conversation_id": "cnv_1"}
     """
     try:
-        item = outbox.propose(conversation_id, subject, sender, draft, why)
+        item = outbox.propose(action, key, title, draft, why, params, subtitle)
     except (ValueError, outbox.SlackError) as e:
         raise ToolError(str(e)) from e
     return f"{item['id']} posted, waiting for approval"
+
+
+def approvals() -> dict:
+    """What this repo allows to be approved, and what each one does."""
+    return {
+        name: {"description": spec.get("description", ""),
+               "ready": outbox.blocked(spec) is None,
+               "blocked_by": outbox.blocked(spec)}
+        for name, spec in outbox.approvals().items()
+    }
 
 
 @mcp.tool()
@@ -57,7 +71,7 @@ def redraft(item_id: str, draft: str) -> str:
 def waiting() -> list[dict]:
     """Everything still waiting on a person."""
     return [
-        {k: i[k] for k in ("id", "conversation_id", "subject", "status", "feedback")}
+        {k: i[k] for k in ("id", "action", "key", "title", "status", "feedback")}
         for i in outbox.load()
         if i["status"] in ("pending", "redraft")
     ]
@@ -65,8 +79,9 @@ def waiting() -> list[dict]:
 
 # Proposing and redrafting post to Slack, so they are only registered when a
 # role is meant to do that. `waiting` and `post_digest` are always safe.
+mcp.tool()(approvals)
 if os.environ.get("OUTBOX_MCP_READONLY") != "1":
-    mcp.tool()(propose_reply)
+    mcp.tool()(propose)
     mcp.tool()(redraft)
 
 if __name__ == "__main__":

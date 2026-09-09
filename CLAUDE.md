@@ -76,8 +76,9 @@ a reboot. That is a supervisor problem. Cron is not.
 - **A plain reply is feedback, never a send.** In the approval loop the two
   signals that send are both explicit (`:+1:`, `send: ...`). Getting this the
   wrong way round sends a half-written sentence to a customer.
-- **Sending is never an MCP tool.** It happens after a person has said so,
-  where no prompt can reach it.
+- **Executing is never an MCP tool.** An approved action runs in the poll,
+  after a person has said so, where no prompt can reach it. What it does is
+  `[approvals.<name>] run = ...` in the repo — capability, reviewed.
 - **An empty value is not a value.** `FRONT_API_TOKEN=` is how a wrapper
   exports one it failed to read; treating it as set is how a run reaches a 401.
 - **A job that could do nothing must fail, not pass quietly.** A poll that read

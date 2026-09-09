@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -51,7 +52,16 @@ def load() -> list[dict]:
     if not p.exists():
         return []
     text = p.read_text().strip()
-    return json.loads(text) if text else []
+    items = json.loads(text) if text else []
+    # Items written before actions existed were all Front replies.
+    for i in items:
+        i.setdefault("action", "front-mail")
+        i.setdefault("key", i.get("conversation_id", i["id"]))
+        i.setdefault("title", i.get("subject", ""))
+        i.setdefault("params", {"conversation_id": i.get("conversation_id", "")})
+        if i.get("status") == "sent":
+            i["status"] = "done"
+    return items
 
 
 def save(items: list[dict]) -> None:
@@ -171,24 +181,39 @@ def replies(ch: str, ts: str) -> list[dict]:
 
 # ---------------------------------------------------------------- proposing
 
-def propose(conversation_id: str, subject: str, sender: str, draft: str,
-            why: str = "") -> dict:
-    """Post a mail and its suggested reply, and remember we are waiting."""
+def propose(action: str, key: str, title: str, draft: str,
+            why: str = "", params: dict | None = None,
+            subtitle: str = "") -> dict:
+    """Post something for a person to approve, and remember we are waiting.
+
+    `action` names an [approvals.*] block in the repo's config - what happens
+    on approval. `key` is what makes it idempotent: the same key cannot be
+    waiting twice.
+    """
+    known = approvals()
+    if known and action not in known:
+        raise ValueError(
+            f"no [approvals.{action}] in this repo's config; "
+            f"there is {', '.join(sorted(known)) or 'none'}"
+        )
     items = load()
-    if any(i["conversation_id"] == conversation_id and i["status"] in ("pending", "redraft")
-           for i in items):
-        raise ValueError(f"{conversation_id} is already waiting on someone")
-    head = f"*{subject}*\nfrom {sender}  ·  `{conversation_id}`"
+    if any(i["key"] == key and i["status"] in ("pending", "redraft") for i in items):
+        raise ValueError(f"{key} is already waiting on someone")
+    head = f"*{title}*"
+    if subtitle:
+        head += f"\n{subtitle}"
+    head += f"  ·  `{key}`"
     if why:
         head += f"\n_{why}_"
     ch = channel()
     ts = post(head, ch=ch)
-    post(f"Suggested reply:\n\n{draft}\n\n{LEGEND}", thread_ts=ts, ch=ch)
+    post(f"Suggested {action}:\n\n{draft}\n\n{LEGEND}", thread_ts=ts, ch=ch)
     item = {
         "id": new_id(items),
-        "conversation_id": conversation_id,
-        "subject": subject,
-        "sender": sender,
+        "action": action,
+        "key": key,
+        "title": title,
+        "params": params or {},
         "channel": ch,
         "ts": ts,
         "draft": draft,
@@ -196,7 +221,7 @@ def propose(conversation_id: str, subject: str, sender: str, draft: str,
         "feedback": None,
         "seen_ts": ts,
         "created": time.strftime("%Y-%m-%d %H:%M"),
-        "sent_at": None,
+        "done_at": None,
         "mocked": None,
     }
     items.append(item)
@@ -210,39 +235,69 @@ def redraft(item_id: str, draft: str) -> dict:
     return it
 
 
-# ------------------------------------------------------------------ sending
+# ---------------------------------------------------------------- executing
 
-def sending_for_real() -> bool:
-    return (
-        os.environ.get("FRONT_SEND") == "1"
-        and bool(os.environ.get("FRONT_API_TOKEN", "").strip())
-        and bool(os.environ.get("FRONT_AUTHOR_ID", "").strip())
-    )
+def config_path() -> Path | None:
+    """The repo's config, found from where the poll is running."""
+    for c in (Path(".rigg/rigg.toml"), Path("rigg.toml")):
+        if c.is_file():
+            return c
+    return None
 
 
-def send(item: dict, text: str) -> dict:
-    """Send a reply, or record what would have been sent.
+def approvals() -> dict[str, dict]:
+    """What this repo says may be approved, and what happens when it is.
 
-    Mocked unless FRONT_SEND=1 with a token and an author. A send that is
-    attributed to the API token rather than a person arrives unsigned, which
-    is why the author is required rather than defaulted.
+    Actions are capability, so they live in the repo and are reviewed. Adding
+    one is a config change - no code here knows what any of them do.
     """
-    if sending_for_real():
-        url = f"https://api2.frontapp.com/conversations/{item['conversation_id']}/messages"
-        body = json.dumps({
-            "body": text,
-            "author_id": os.environ["FRONT_AUTHOR_ID"],
-        }).encode()
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {os.environ['FRONT_API_TOKEN']}",
-                "Content-Type": "application/json",
-            },
+    p = config_path()
+    if p is None:
+        return {}
+    try:
+        import tomllib
+        return tomllib.loads(p.read_text()).get("approvals", {})
+    except Exception:
+        return {}
+
+
+def blocked(spec: dict) -> str | None:
+    """Why this action cannot run for real, if it cannot."""
+    if not spec.get("run"):
+        return "it has no `run`"
+    missing = [n for n in spec.get("needs", []) if not os.environ.get(n, "").strip()]
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        return f"{', '.join(missing)} {verb} not set for instance `{instance()}`"
+    return None
+
+
+def execute(item: dict, text: str) -> dict:
+    """Do the thing, or write down what would have been done.
+
+    Mocked whenever the action's `needs` are not all present, which is the
+    same seam `rigg doctor` reads - so an approval that cannot really run says
+    so before anyone clicks, rather than after.
+    """
+    spec = approvals().get(item.get("action", ""), {})
+    why = blocked(spec)
+    if why is None:
+        env = dict(os.environ)
+        env["RIGG_APPROVAL_ID"] = item["id"]
+        env["RIGG_APPROVAL_ACTION"] = item["action"]
+        env["RIGG_APPROVAL_KEY"] = item["key"]
+        env["RIGG_APPROVAL_TITLE"] = item.get("title", "")
+        for k, v in (item.get("params") or {}).items():
+            env[f"RIGG_APPROVAL_{k.upper()}"] = str(v)
+        r = subprocess.run(
+            spec["run"], shell=True, input=text, text=True, env=env,
+            capture_output=True, timeout=120,
         )
-        with urllib.request.urlopen(req, timeout=30):
-            pass
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"{item['action']} failed ({r.returncode}): "
+                f"{(r.stderr or r.stdout).strip()[:300]}"
+            )
         mocked = False
     else:
         p = sent_log()
@@ -250,16 +305,18 @@ def send(item: dict, text: str) -> dict:
         with p.open("a") as fh:
             fh.write(json.dumps({
                 "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "conversation_id": item["conversation_id"],
-                "subject": item["subject"],
+                "action": item.get("action"),
+                "key": item["key"],
+                "title": item.get("title"),
                 "text": text,
+                "why_mocked": why,
             }, ensure_ascii=False) + "\n")
-        mocked = True
+        mocked = why
     return update(
         item["id"],
-        status="sent",
+        status="done",
         draft=text,
-        sent_at=time.strftime("%Y-%m-%d %H:%M"),
+        done_at=time.strftime("%Y-%m-%d %H:%M"),
         mocked=mocked,
     )
 
