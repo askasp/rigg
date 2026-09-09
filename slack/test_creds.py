@@ -14,7 +14,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix="rigg-creds-test-")
-os.environ["RIGG_SECRETS_DIR"] = TMP
+os.environ["RIGG_HOME"] = TMP
 os.environ["RIGG_INSTANCE"] = "test"
 
 import creds  # noqa: E402

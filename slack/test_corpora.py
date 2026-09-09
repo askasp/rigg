@@ -16,10 +16,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 MAIL_DIR = tempfile.mkdtemp(prefix="rigg-mail-test-")
-os.environ["RIGG_CORPUS_DIR"] = tempfile.mkdtemp(prefix="rigg-corpus-test-")
+os.environ["RIGG_HOME"] = tempfile.mkdtemp(prefix="rigg-home-test-")
 os.environ["RIGG_MAIL_DIR"] = MAIL_DIR
 # So a run of these never reads - or writes - the real credentials.
-os.environ["RIGG_SECRETS_DIR"] = tempfile.mkdtemp(prefix="rigg-secrets-test-")
 os.environ["RIGG_INSTANCE"] = "test"
 
 import corpora  # noqa: E402

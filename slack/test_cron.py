@@ -12,11 +12,8 @@ import tempfile
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ["RIGG_CRON_DIR"] = tempfile.mkdtemp(prefix="rigg-cron-test-")
-os.environ["RIGG_NOTES_DIR"] = tempfile.mkdtemp(prefix="rigg-notes-test-")
+os.environ["RIGG_HOME"] = tempfile.mkdtemp(prefix="rigg-home-test-")
 # So a run of these never reads - or writes - the real credentials.
-os.environ["RIGG_SECRETS_DIR"] = tempfile.mkdtemp(prefix="rigg-secrets-test-")
-os.environ["RIGG_CORPUS_DIR"] = tempfile.mkdtemp(prefix="rigg-corpus-test-")
 os.environ["RIGG_INSTANCE"] = "test"
 
 # A job whose repo has gone is now a state of its own, so the fixtures need one
