@@ -670,7 +670,40 @@ fn real_main() -> Result<()> {
             }
             std::fs::write(&path, config::TEMPLATE)?;
             println!("wrote {}", path.display());
-            println!("Edit the steps, then: rigg run --task \"...\"");
+
+            // The rest of the tree is what nobody finds by reading one file:
+            // where a prompt lives, where an mcp surface goes, and which of
+            // the three planes this directory is.
+            let dir = path.parent().unwrap_or(&root).to_path_buf();
+            for (rel, body) in [
+                ("README.md", config::README),
+                ("prompts/reviewer.md", config::REVIEWER_PROMPT),
+            ] {
+                let f = dir.join(rel);
+                if let Some(d) = f.parent() {
+                    std::fs::create_dir_all(d)?;
+                }
+                if f.exists() && !force {
+                    println!("kept  {}", f.display());
+                    continue;
+                }
+                std::fs::write(&f, body)?;
+                println!("wrote {}", f.display());
+            }
+            let mcp = dir.join("mcp");
+            std::fs::create_dir_all(&mcp)?;
+            let keep = mcp.join(".gitkeep");
+            if !keep.exists() {
+                std::fs::write(&keep, "")?;
+            }
+            println!("wrote {}/", mcp.display());
+
+            println!("\nNext:");
+            println!("  rigg doctor              is the chain intact");
+            println!("  rigg plan                the steps a run would take");
+            println!("  rigg corpus              what a role could be given");
+            println!("  rigg cron                what runs unattended");
+            println!("  rigg run --task \"...\"    run it");
         }
 
         Cmd::Doctor => doctor(&root, cli.config.as_deref())?,

@@ -506,4 +506,110 @@ prompt = "Address every finding from the review above. If a finding is wrong, sa
 id = "push"
 run = "git push -u origin {{branch}}"
 confirm = true
+
+# --- things you will want next, and where they go --------------------------
+# `rigg corpus enable <name>` writes the first two for you.
+
+# A role holding an API surface. The repo says which tools; the instance holds
+# the token, and `needs` is what lets `rigg doctor` answer before a run does.
+# [agents.mailer]
+# kind = "claude"
+# needs = ["FRONT_API_TOKEN"]
+# args = ["--permission-mode", "auto",
+#         "--mcp-config", ".rigg/mcp/mail.json", "--strict-mcp-config",
+#         "--allowedTools", "mcp__mail"]
+
+# A shell step's stdout becomes a placeholder, and `when` skips the step after
+# it when there is nothing there - so a quiet poll costs no agent turn.
+# [[pipelines.check.steps]]
+# id = "look"
+# run = "./scripts/whats-pending.sh"
+# capture = "pending"
+#
+# [[pipelines.check.steps]]
+# id = "act"
+# agent = "impl"
+# when = "{{pending}}"
+# prompt = "Deal with these:\n{{pending}}"
+
+# An action a person approves in Slack before it happens. The draft arrives on
+# stdin; the item's fields arrive as RIGG_APPROVAL_*.
+# [approvals.reply]
+# description = "Reply to a customer"
+# run = "./scripts/send-reply.sh"
+# needs = ["API_TOKEN"]
+
+# Progress into the Slack thread that asked for the branch.
+# [notify]
+# command = "/path/to/rigg/slack/notify.sh"
+"#;
+
+pub const README: &str = r#"# .rigg
+
+What this repo lets an agent do. Three places hold everything, and rigg is the
+only thing that reads all three:
+
+| plane | where | holds |
+| --- | --- | --- |
+| capability | `.rigg/` (here) | pipelines, roles, prompts, mcp surfaces, approvals |
+| identity | `~/.rigg/instances/<inst>/` | secrets, schedules, notes, corpora |
+| activity | `.git/rigg/` | stacks, run status, logs |
+
+The planes never reach into each other. **This directory names a secret; it
+never contains one.** An instance holds a schedule; it never holds a pipeline.
+
+## What goes here
+
+```
+.rigg/
+  rigg.toml     pipelines, roles, features, vars
+  prompts/      anything a step names with prompt_file
+  mcp/          an API surface a role may hold - `rigg corpus enable` writes these
+```
+
+Changing anything here changes what an agent *can do*, so it goes through a
+diff and a review. Changing a token or a schedule does not — those are typed:
+
+```sh
+rigg secret set API_TOKEN <value>     # identity, takes effect now
+rigg cron add "0 7 * * *" --pipeline morning
+```
+
+## The commands you will actually use
+
+```sh
+rigg doctor                  is the chain intact - binaries, config, secrets
+rigg plan                    the steps a run would take, and on which model
+rigg corpus                  bodies of past work a role could be given
+rigg cron                    what runs unattended, and when it next does
+rigg run --task "..."        run the pipeline here
+rigg new <stack> "..."       cut a branch and run it there
+```
+
+## Adding to this file
+
+- a new step: add to `[[steps]]`, or a named `[pipelines.x]`
+- a role that needs a token: give it `needs = ["NAME"]` so `rigg doctor` can
+  answer the day you write it, instead of the run finding out at 07:04
+- a corpus: `rigg corpus enable <name>` — it writes the mcp json and the
+  pipelines and leaves them uncommitted for you to read
+- something on a schedule: `rigg cron add`, not a line in here
+
+An agent running unattended needs a permission mode or it will describe
+changes instead of making them, report the step ok, and fail three steps later
+at `git push` with a branch that has no commits.
+"#;
+
+pub const REVIEWER_PROMPT: &str = r#"Review the diff on this branch against {{base}}.
+
+Look for defects that would reach a user: wrong behaviour, an unhandled case, a
+silent failure. Then look for the ones that are silent by nature — something
+that reports success having done nothing, an error that names no fix, state
+written to the wrong place.
+
+Skip style. Skip anything the tests already assert.
+
+For each finding: the file and line, what breaks, and the smallest change that
+fixes it. If you find nothing worth changing, say so in one line rather than
+inventing something.
 "#;
