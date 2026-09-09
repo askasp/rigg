@@ -79,6 +79,11 @@ impl Runner {
     }
 
     fn should_run(&self, step: &Step) -> Result<bool> {
+        if let Some(cond) = &step.when {
+            if util::render(cond, &self.vars).trim().is_empty() {
+                return Ok(false);
+            }
+        }
         let Some(globs) = &step.when_changed else {
             return Ok(true);
         };
@@ -178,7 +183,11 @@ impl Runner {
             self.at = Some(step.id.clone());
 
             if !self.should_run(step)? {
-                println!("  skipped: no matching changed files");
+                if step.when.is_some() {
+                    println!("  skipped: nothing to do");
+                } else {
+                    println!("  skipped: no matching changed files");
+                }
                 continue;
             }
             if step.confirm && !self.dry_run && !self.confirm(step)? {

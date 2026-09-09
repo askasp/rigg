@@ -138,6 +138,10 @@ pub struct Step {
     /// Only run when changed files match one of these globs.
     #[serde(default)]
     pub when_changed: Option<Vec<String>>,
+    /// Run only when this renders to something non-empty, so a step can be
+    /// skipped by an earlier step's `capture` finding nothing to do.
+    #[serde(default)]
+    pub when: Option<String>,
     /// Keep going when this step fails.
     #[serde(default)]
     pub continue_on_error: bool,

@@ -3683,10 +3683,13 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
     let have = instance::secrets();
     println!("instance       {} ({})", instance::name(), instance::dir().display());
     if let Ok(c) = &cfg {
+        // One line per secret, not per role that wants it.
         let mut wanted: Vec<(&String, &String)> = Vec::new();
         for (role, a) in &c.agents {
             for n in &a.needs {
-                wanted.push((role, n));
+                if !wanted.iter().any(|(_, w)| *w == n) {
+                    wanted.push((role, n));
+                }
             }
         }
         for (role, n) in wanted {
