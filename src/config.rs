@@ -39,10 +39,34 @@ pub struct Config {
     /// they are typed here and `rigg doctor` can say which are ready.
     #[serde(default)]
     pub approvals: BTreeMap<String, Approval>,
+    /// What runs unattended, and when. Declared here so a checkout says when
+    /// it runs; the instance holds only the state of these.
+    #[serde(default)]
+    pub schedules: Vec<ScheduleCfg>,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleCfg {
+    pub id: String,
+    /// Five cron fields, or an @alias.
+    pub cron: String,
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
+    /// `run` drives the pipeline in the repo; `new` cuts a branch for it.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Where it reports, for a run that has no Slack thread to reply in.
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -412,6 +436,33 @@ impl Config {
         // rather than a surprise the first time that pipeline is chosen.
         for name in self.pipelines.keys() {
             self.resolve_pipeline(name, &mut Vec::new())?;
+        }
+        // A schedule nobody can run is worth catching here rather than at
+        // 07:00, when the only symptom is silence.
+        let mut ids: Vec<&str> = Vec::new();
+        for s in &self.schedules {
+            if s.id.trim().is_empty() || s.id.contains('/') {
+                bail!("schedule id `{}` must be non-empty and contain no `/`", s.id);
+            }
+            if ids.contains(&s.id.as_str()) {
+                bail!("two schedules share the id `{}`", s.id);
+            }
+            ids.push(&s.id);
+            crate::cron::Expr::parse(&s.cron)
+                .with_context(|| format!("schedule `{}`", s.id))?;
+            if let Some(p) = &s.pipeline {
+                if !self.pipelines.contains_key(p) {
+                    let known: Vec<&str> = self.pipelines.keys().map(|k| k.as_str()).collect();
+                    bail!(
+                        "schedule `{}` runs pipeline `{p}`, which does not exist; known: {}",
+                        s.id,
+                        if known.is_empty() { "(none)".into() } else { known.join(", ") }
+                    );
+                }
+            }
+            if s.pipeline.is_none() && s.task.is_none() {
+                bail!("schedule `{}` has neither a pipeline nor a task", s.id);
+            }
         }
         if let Some(d) = &self.default_pipeline {
             if !self.pipelines.contains_key(d) {

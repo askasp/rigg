@@ -13,8 +13,8 @@ rigg is the only thing that reads all three. Nothing else may reach across.
 
 | plane | where | holds | lifetime |
 | --- | --- | --- | --- |
-| capability | `<repo>/.rigg/` | pipelines, roles, prompts, mcp surfaces, approvals | versioned, reviewed in a PR |
-| identity | `~/.rigg/instances/<inst>/` | secrets, schedules, notes, corpora, outbox, logs | never committed, one dir per tenant |
+| capability | `<repo>/.rigg/` | pipelines, roles, prompts, mcp surfaces, approvals, schedules | versioned, reviewed in a PR |
+| identity | `~/.rigg/instances/<inst>/` | secrets, notes, corpora, outbox, logs, the repos it covers, and the *state* of declared schedules | never committed, one dir per tenant |
 | activity | `<git-common-dir>/rigg/` | stacks, run status, logs, thread map | disposable, rebuildable |
 
 Before adding state anywhere, name its plane. If it does not fit one, it is
@@ -31,6 +31,19 @@ tenant, not to a repo.
 **Every Slack command is `rigg` plus the same words.** The bridge translates a
 message into an argv and renders what comes back. It owns no logic. If the
 bridge needs a verb rigg does not have, that is a bug in rigg — add the verb.
+
+**A repo declares its schedules; the instance holds their state.** `[[schedules]]`
+in `.rigg/rigg.toml` is read from the repo's **main checkout only** — never a
+worktree, for the reason GitHub schedules only from the default branch: rigg cuts
+a worktree per branch, and reading all of them would let any branch change when
+things run. An instance runs a repo's schedules only once `rigg repo add`
+registers it, and a repo belongs to exactly one instance — two would double-fire
+with neither able to say why.
+
+`rigg cron add` is unchanged and is not deprecated: typed jobs need no PR and are
+the right answer for what you want this week. `rigg cron export` turns one into a
+`[[schedules]]` block when it has earned permanence. `rigg cron edit`/`rm` refuse
+a declared job and name the file instead.
 
 **Nothing in a repo's config may name an absolute path.** A tool a pipeline
 runs is vendored into `<repo>/.rigg/tools/` and named relatively, so a clone
@@ -55,7 +68,8 @@ and leaves it uncommitted. Never silently mutate a repo's capability.
 | a tool a pipeline runs | `<repo>/.rigg/tools/` — `rigg corpus enable` copies it there | no |
 | a tool surface for an agent | an MCP server + `.rigg/mcp/*.json` | no |
 | an approval action | `[approvals.<name>]` in the repo config | no |
-| a schedule | `rigg cron add` | no |
+| a schedule that must survive a rebuild | `[[schedules]]` in the repo | no |
+| an ad-hoc schedule | `rigg cron add` — no PR, fires next tick | no |
 | a secret | `rigg secret set` | no |
 | an agent kind | `[agents.x] command = [...]` | no |
 | **a step key, a subcommand, a flag** | `src/` | **yes** |

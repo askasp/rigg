@@ -46,6 +46,73 @@ pub fn cron_path() -> PathBuf {
     dir().join("cron.json")
 }
 
+/// The main checkouts this instance covers. A repo belongs to exactly one
+/// instance, which is what lets a repo declare its own schedules.
+pub fn repos_path() -> PathBuf {
+    dir().join("repos.json")
+}
+
+pub fn repos() -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(repos_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn write_repos(list: &[PathBuf]) -> Result<()> {
+    ensure_dir()?;
+    let out: Vec<String> = list.iter().map(|p| p.display().to_string()).collect();
+    let path = repos_path();
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&out)? + "\n")?;
+    fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Returns false when it was already registered.
+pub fn add_repo(path: &std::path::Path) -> Result<bool> {
+    let mut list = repos();
+    if list.iter().any(|p| p == path) {
+        return Ok(false);
+    }
+    // Another instance holding the same repo would fire its schedules twice,
+    // with neither side able to say why.
+    for other in all() {
+        if other == name() {
+            continue;
+        }
+        let f = dir_for(&other).join("repos.json");
+        if let Ok(t) = fs::read_to_string(&f) {
+            if serde_json::from_str::<Vec<String>>(&t)
+                .unwrap_or_default()
+                .iter()
+                .any(|p| std::path::Path::new(p) == path)
+            {
+                bail!("{} is already registered to instance `{other}`", path.display());
+            }
+        }
+    }
+    list.push(path.to_path_buf());
+    list.sort();
+    write_repos(&list)?;
+    Ok(true)
+}
+
+pub fn rm_repo(path: &std::path::Path) -> Result<bool> {
+    let mut list = repos();
+    let before = list.len();
+    list.retain(|p| p != path);
+    if list.len() == before {
+        return Ok(false);
+    }
+    write_repos(&list)?;
+    Ok(true)
+}
+
 pub fn notes_path() -> PathBuf {
     dir().join("notes.md")
 }
@@ -55,7 +122,6 @@ pub fn corpus_dir() -> PathBuf {
     dir().join("corpus")
 }
 
-#[allow(dead_code)]
 pub fn all() -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(root().join("instances")) {

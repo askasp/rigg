@@ -41,6 +41,7 @@ _rigg() {
     'doctor:Check the environment'
     'secret:Show, set or remove this instance's secrets'
     'cron:Schedules for this instance'
+    'repo:Repos this instance covers'
     'tick:Fire whatever is due this minute'
     'keys:Show the shell keybindings and aliases'
     'stack:Manage stacks'
@@ -60,8 +61,9 @@ _rigg() {
     adopt) (( CURRENT == 3 )) && _rigg_branches ;;
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
     secret) (( CURRENT == 3 )) && _values 'subcommand' set rm list ;;
+    repo) (( CURRENT == 3 )) && _values 'subcommand' add rm list ;;
     cron)
-      (( CURRENT == 3 )) && _values 'subcommand' add edit rm run show list names
+      (( CURRENT == 3 )) && _values 'subcommand' add edit rm run show list names export
       (( CURRENT == 4 )) && [[ "${words[3]}" != "add" ]] && _rigg_cron_jobs
       ;;
   esac

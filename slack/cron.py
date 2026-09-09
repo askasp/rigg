@@ -274,8 +274,13 @@ def instance() -> str:
 
 
 def store_path(inst: str | None = None) -> Path:
+    # Not cron.json: `rigg cron` owns that file, with a different row shape -
+    # an int id here against a string id there, and epoch seconds against
+    # "YYYY-MM-DD HH:MM". Sharing the name meant whichever wrote last silently
+    # broke the other's reader. The bridge's own scheduler is redundant with
+    # `rigg tick` and should go; until it does, it stores its own.
     root = Path(os.environ.get("RIGG_HOME") or (Path.home() / ".rigg"))
-    return root / "instances" / (inst or instance()) / "cron.json"
+    return root / "instances" / (inst or instance()) / "cron-slack.json"
 
 
 def load(inst: str | None = None) -> list[dict]:

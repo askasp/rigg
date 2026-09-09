@@ -325,6 +325,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<SecretCmd>,
     },
+    /// Repos this instance covers, whose declared schedules it runs.
+    Repo {
+        #[command(subcommand)]
+        cmd: Option<RepoCmd>,
+    },
     /// Corpora a role can be given: what is available, and wiring one in.
     Corpus {
         #[command(subcommand)]
@@ -358,6 +363,16 @@ enum SecretCmd {
     /// Remove one this instance set.
     Rm { name: String },
     /// List them, masked.
+    List,
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// Register one. Defaults to the repo you are standing in.
+    Add { path: Option<String> },
+    /// Stop covering one. Its declared schedules stop running.
+    Rm { path: Option<String> },
+    /// What this instance covers.
     List,
 }
 
@@ -397,6 +412,9 @@ enum CronCmd {
         /// Set a placeholder for every run of this job. Repeatable.
         #[arg(long = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
+        /// Where it reports, for a run with no Slack thread to reply in.
+        #[arg(long)]
+        channel: Option<String>,
         /// Name the job. Defaults to one derived from what it runs.
         #[arg(long)]
         id: Option<String>,
@@ -415,6 +433,8 @@ enum CronCmd {
         #[arg(long = "var", value_name = "NAME=VALUE")]
         vars: Vec<String>,
         #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
         pause: bool,
         #[arg(long)]
         resume: bool,
@@ -430,6 +450,8 @@ enum CronCmd {
     },
     /// Everything about one job, including its log.
     Show { id: String },
+    /// Print a typed job as a [[schedules]] block, to make it permanent.
+    Export { id: String },
     /// Print the job ids, one per line, for shell completion.
     Names,
     /// List them.
@@ -573,7 +595,7 @@ fn rewrite_pipeline_prefix(mut argv: Vec<String>) -> Vec<String> {
     }
     let first = argv[1].clone();
     // `cron add` and `cron run` are subcommands, not a pipeline called cron.
-    const NOT_A_PIPELINE: [&str; 5] = ["corpus", "cron", "secret", "stack", "tick"];
+    const NOT_A_PIPELINE: [&str; 6] = ["corpus", "cron", "repo", "secret", "stack", "tick"];
     if first.starts_with('-')
         || NOT_A_PIPELINE.contains(&first.as_str())
         || !PIPELINE_VERBS.contains(&argv[2].as_str())
@@ -643,13 +665,16 @@ fn real_main() -> Result<()> {
         Cmd::Secret { cmd } => return secret_cmd(cmd),
         Cmd::Cron { cmd } => return cron_cmd(cmd),
         Cmd::Tick { at, dry_run } => return tick_cmd(at.as_deref(), dry_run),
+        Cmd::Repo { cmd } => return repo_cmd(cmd),
         _ => {}
     }
 
     let root = util::repo_root()?;
 
     match cli.cmd {
-        Cmd::Secret { .. } | Cmd::Cron { .. } | Cmd::Tick { .. } => unreachable!("handled above"),
+        Cmd::Secret { .. } | Cmd::Cron { .. } | Cmd::Tick { .. } | Cmd::Repo { .. } => {
+            unreachable!("handled above")
+        }
         Cmd::Corpus { cmd } => corpus_cmd(&root, cli.config.as_deref(), cmd)?,
         Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
@@ -3426,6 +3451,59 @@ fn missing_secrets(cfg: &Config, steps: &[config::Step]) -> Result<()> {
     bail!("{}", msg.trim_end());
 }
 
+/// The main checkout of the repo at `path`, or of the one we are standing in.
+fn a_repo(path: Option<String>) -> Result<std::path::PathBuf> {
+    let root = match path {
+        Some(p) => std::fs::canonicalize(&p).with_context(|| format!("{p} is not there"))?,
+        None => util::repo_root()?,
+    };
+    // Register the main checkout, never a worktree: schedules are read from
+    // there, so registering a branch would tie them to that branch's life.
+    Ok(util::main_checkout(&root).unwrap_or(root))
+}
+
+fn repo_cmd(cmd: Option<RepoCmd>) -> Result<()> {
+    match cmd.unwrap_or(RepoCmd::List) {
+        RepoCmd::Add { path } => {
+            let root = a_repo(path)?;
+            if instance::add_repo(&root)? {
+                println!("instance `{}` now covers {}", instance::name(), root.display());
+                let n = crate::config::Config::load(&root, None)
+                    .map(|c| c.schedules.len())
+                    .unwrap_or(0);
+                println!("  {n} declared schedule(s) - rigg cron");
+            } else {
+                println!("{} was already registered", root.display());
+            }
+        }
+        RepoCmd::Rm { path } => {
+            let root = a_repo(path)?;
+            if instance::rm_repo(&root)? {
+                println!("{} removed; its declared schedules no longer run", root.display());
+            } else {
+                bail!("{} is not registered to instance `{}`", root.display(), instance::name());
+            }
+        }
+        RepoCmd::List => {
+            let list = instance::repos();
+            println!("instance {}  {}", instance::name(), instance::repos_path().display());
+            if list.is_empty() {
+                println!("\nno repos covered:  rigg repo add");
+                return Ok(());
+            }
+            println!();
+            for r in list {
+                let n = crate::config::Config::load(&r, None)
+                    .map(|c| c.schedules.len())
+                    .unwrap_or(0);
+                let state = if r.is_dir() { format!("{n} schedule(s)") } else { "MISSING".into() };
+                println!("  {:<60} {state}", r.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn secret_cmd(cmd: Option<SecretCmd>) -> Result<()> {
     match cmd.unwrap_or(SecretCmd::List) {
         SecretCmd::Set { name, value } => {
@@ -3500,7 +3578,7 @@ fn slug(text: &str) -> String {
 
 fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
     match cmd.unwrap_or(CronCmd::List) {
-        CronCmd::Add { words, pipeline, task, new, repo, vars, id } => {
+        CronCmd::Add { words, pipeline, task, new, repo, vars, channel, id } => {
             let (schedule, typed) = split_schedule(&words)?;
             let expr = cron::Expr::parse(&schedule)?;
             let task = task.or(typed);
@@ -3532,6 +3610,8 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
                 task,
                 kind: if new { "new".into() } else { "run".into() },
                 vars,
+                channel,
+                source: None,
                 paused: false,
                 created: Some(cron::now(None)?.stamp()),
                 last_run: None,
@@ -3552,9 +3632,23 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
                 println!("  * * * * * {} {} tick", cron_sh_path(), instance::name());
             }
         }
-        CronCmd::Edit { id, schedule, pipeline, task, repo, vars, pause, resume } => {
+        CronCmd::Edit { id, schedule, pipeline, task, repo, vars, channel, pause, resume } => {
             let mut jobs = cron::load()?;
-            let target = cron::find(&jobs, &id)?.id.clone();
+            let found = cron::find(&jobs, &id)?;
+            let target = found.id.clone();
+            // A declaration lives in a repo and is changed there, in a diff.
+            // Pausing is instance intent, so that one is still allowed.
+            if let Some(src) = found.source.clone() {
+                let only_state = schedule.is_none() && pipeline.is_none() && task.is_none()
+                    && repo.is_none() && vars.is_empty() && channel.is_none();
+                if !only_state {
+                    bail!(
+                        "`{target}` is declared in {}/.rigg/rigg.toml - edit it there.\n\
+                         Only --pause and --resume apply here.",
+                        src
+                    );
+                }
+            }
             if let Some(s) = &schedule {
                 cron::Expr::parse(s)?;
             }
@@ -3582,6 +3676,9 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
             if !vars.is_empty() {
                 job.vars = vars;
             }
+            if let Some(c) = channel {
+                job.channel = if c.is_empty() { None } else { Some(c) };
+            }
             if pause {
                 job.paused = true;
             }
@@ -3595,7 +3692,14 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
         }
         CronCmd::Rm { id } => {
             let mut jobs = cron::load()?;
-            let target = cron::find(&jobs, &id)?.id.clone();
+            let found = cron::find(&jobs, &id)?;
+            if let Some(src) = &found.source {
+                bail!(
+                    "`{}` is declared in {}/.rigg/rigg.toml - remove it there.",
+                    found.id, src
+                );
+            }
+            let target = found.id.clone();
             jobs.retain(|j| j.id != target);
             cron::save(&jobs)?;
             println!("{target} removed");
@@ -3610,6 +3714,13 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
             let job = cron::find(&jobs, &id)?;
             println!("{}", job.id);
             println!("  schedule  {}{}", job.schedule, if job.paused { "  [paused]" } else { "" });
+            match &job.source {
+                Some(src) => println!("  declared  {src}/.rigg/rigg.toml"),
+                None => println!("  declared  no - typed with `rigg cron add`"),
+            }
+            if let Some(c) = &job.channel {
+                println!("  reports   {c}");
+            }
             println!("  runs      rigg {}", job.argv().join(" "));
             println!("  in        {}", job.repo);
             if let Some(w) = cron::Expr::parse(&job.schedule).ok().and_then(|e| e.next(&cron::now(None).ok()?, 1).into_iter().next()) {
@@ -3624,6 +3735,36 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
             let log = cron::log_path(&job.id);
             if log.exists() {
                 println!("  log       {}", log.display());
+            }
+        }
+        CronCmd::Export { id } => {
+            let jobs = cron::load()?;
+            let j = cron::find(&jobs, &id)?;
+            let short = j.id.rsplit('/').next().unwrap_or(&j.id);
+            println!("# paste into {}/.rigg/rigg.toml, then:  rigg cron rm {}", j.repo, j.id);
+            println!("[[schedules]]");
+            println!("id       = \"{short}\"");
+            println!("cron     = \"{}\"", j.schedule);
+            if let Some(p) = &j.pipeline {
+                println!("pipeline = \"{p}\"");
+            }
+            if let Some(t) = &j.task {
+                println!("task     = \"{}\"", t.replace('"', "\\\""));
+            }
+            if let Some(c) = &j.channel {
+                println!("channel  = \"{c}\"");
+            }
+            if j.kind != "run" {
+                println!("kind     = \"{}\"", j.kind);
+            }
+            if !j.vars.is_empty() {
+                let pairs: Vec<String> = j
+                    .vars
+                    .iter()
+                    .filter_map(|kv| kv.split_once('='))
+                    .map(|(k, v)| format!("{k} = \"{v}\""))
+                    .collect();
+                println!("vars     = {{ {} }}", pairs.join(", "));
             }
         }
         CronCmd::Names => {
@@ -3650,10 +3791,14 @@ fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
                     Err(_) => "BAD SCHEDULE".into(),
                 };
                 let next = if j.paused { "paused".to_string() } else { next };
-                println!("  {:<20} {:<16} {:<18} {}", j.id, j.schedule, next, j.describe());
+                let mark = if j.declared() { " ·" } else { "  " };
+                println!("{mark} {:<22} {:<16} {:<18} {}", j.id, j.schedule, next, j.describe());
                 if let (Some(r), Some(st)) = (&j.last_run, &j.last_status) {
                     println!("  {:<20} last {r}  {st}{}", "", j.last_detail.as_deref().map(|d| format!("  {d}")).unwrap_or_default());
                 }
+            }
+            if jobs.iter().any(|j| j.declared()) {
+                println!("\n  ·  declared in a repo - edit the file, not `rigg cron`");
             }
             if !crontab_has_tick() {
                 println!("\nNothing is knocking. Add:  * * * * * {} {} tick", cron_sh_path(), instance::name());
@@ -3764,6 +3909,35 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
                     "{label:<14} dry run - {} not set",
                     missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
                 );
+            }
+        }
+    }
+
+    // A schedule the repo declares, and whether this instance will run it.
+    if let Ok(c) = &cfg {
+        if !c.schedules.is_empty() {
+            let main = util::main_checkout(root).unwrap_or_else(|_| root.to_path_buf());
+            let covered = instance::repos().iter().any(|r| *r == main);
+            if !covered {
+                println!("schedules      {} declared, NOT RUN - rigg repo add", c.schedules.len());
+                problems += 1;
+            }
+            let now = cron::now(None).ok();
+            for sch in &c.schedules {
+                let label = format!("  {}", sch.id);
+                let next = match (cron::Expr::parse(&sch.cron), &now) {
+                    (Ok(e), Some(n)) => e
+                        .next(n, 1)
+                        .first()
+                        .map(|w| w.stamp())
+                        .unwrap_or_else(|| "never".into()),
+                    _ => "BAD SCHEDULE".into(),
+                };
+                if covered {
+                    println!("{label:<14} {} next {next}", sch.cron);
+                } else {
+                    println!("{label:<14} {}", sch.cron);
+                }
             }
         }
     }

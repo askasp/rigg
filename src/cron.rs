@@ -271,6 +271,12 @@ pub struct Job {
     /// `name=value` for the pipeline's placeholders, as `--var` takes them.
     #[serde(default)]
     pub vars: Vec<String>,
+    /// Where a run with no Slack thread reports. Overrides the instance's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// The repo whose config declared this, or None when it was typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default)]
     pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,6 +296,10 @@ fn default_kind() -> String {
 }
 
 impl Job {
+    pub fn declared(&self) -> bool {
+        self.source.is_some()
+    }
+
     /// What the job would have been typed as.
     pub fn argv(&self) -> Vec<String> {
         let mut v = Vec::new();
@@ -343,7 +353,10 @@ impl Job {
     }
 }
 
-pub fn load() -> Result<Vec<Job>> {
+/// What is in cron.json: jobs someone typed, and state for jobs a repo
+/// declares. A declaration never round-trips through here, so it cannot drift
+/// from the file it came from.
+fn stored() -> Result<Vec<Job>> {
     let path = instance::cron_path();
     if !path.exists() {
         return Ok(Vec::new());
@@ -355,13 +368,107 @@ pub fn load() -> Result<Vec<Job>> {
     serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
 }
 
+/// A repo's declared schedules, read from its main checkout.
+///
+/// Only the main checkout: rigg cuts a worktree per branch, and reading every
+/// one of them would let any feature branch change when things run - which is
+/// why GitHub only schedules from the default branch too.
+fn declared_in(repo: &Path) -> Vec<Job> {
+    let root = crate::util::main_checkout(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let Ok(cfg) = crate::config::Config::load(&root, None) else {
+        return Vec::new();
+    };
+    let base = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".into());
+    cfg.schedules
+        .iter()
+        .map(|s| Job {
+            id: format!("{base}/{}", s.id),
+            schedule: s.cron.clone(),
+            repo: root.display().to_string(),
+            pipeline: s.pipeline.clone(),
+            task: s.task.clone(),
+            kind: s.kind.clone().unwrap_or_else(default_kind),
+            vars: s.vars.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+            channel: s.channel.clone(),
+            source: Some(root.display().to_string()),
+            paused: false,
+            created: None,
+            last_run: None,
+            last_status: None,
+            last_detail: None,
+            pid: None,
+        })
+        .collect()
+}
+
+/// Every job this instance runs: typed ones as stored, declared ones as their
+/// repo says, each wearing whatever state the instance has recorded for it.
+pub fn load() -> Result<Vec<Job>> {
+    let stored = stored()?;
+    let mut out: Vec<Job> = Vec::new();
+    for repo in instance::repos() {
+        for mut job in declared_in(&repo) {
+            if let Some(st) = stored.iter().find(|s| s.id == job.id) {
+                job.paused = st.paused;
+                job.created = st.created.clone();
+                job.last_run = st.last_run.clone();
+                job.last_status = st.last_status.clone();
+                job.last_detail = st.last_detail.clone();
+                job.pid = st.pid;
+            }
+            out.push(job);
+        }
+    }
+    // A typed job, or state left behind by a declaration that is gone - the
+    // latter is dropped here, which is the reaping `rm` does for typed ones.
+    for job in stored {
+        if job.declared() {
+            continue;
+        }
+        if !out.iter().any(|o| o.id == job.id) {
+            out.push(job);
+        }
+    }
+    Ok(out)
+}
+
 pub fn save(jobs: &[Job]) -> Result<()> {
     let path = instance::cron_path();
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
+    // A declared job is written back as state only: its definition lives in a
+    // repo, and a copy here would be a second answer to the same question.
+    let rows: Vec<Job> = jobs
+        .iter()
+        .map(|j| {
+            if !j.declared() {
+                return j.clone();
+            }
+            Job {
+                id: j.id.clone(),
+                schedule: String::new(),
+                repo: String::new(),
+                pipeline: None,
+                task: None,
+                kind: String::new(),
+                vars: Vec::new(),
+                channel: None,
+                source: j.source.clone(),
+                paused: j.paused,
+                created: j.created.clone(),
+                last_run: j.last_run.clone(),
+                last_status: j.last_status.clone(),
+                last_detail: j.last_detail.clone(),
+                pid: j.pid,
+            }
+        })
+        .collect();
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(jobs)? + "\n")?;
+    std::fs::write(&tmp, serde_json::to_string_pretty(&rows)? + "\n")?;
     std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -517,7 +624,11 @@ fn spawn_runner(job: &Job) -> Result<u32> {
     let out = std::fs::File::create(&log)
         .with_context(|| format!("opening {}", log.display()))?;
     let err = out.try_clone()?;
-    let child = Command::new("setsid")
+    let mut cmd = Command::new("setsid");
+    if let Some(ch) = &job.channel {
+        cmd.env("RIGG_NOTIFY_CHANNEL", ch);
+    }
+    let child = cmd
         .arg(&exe)
         .arg("cron")
         .arg("run")
@@ -550,7 +661,11 @@ pub fn run_job(id: &str, fired: bool) -> Result<()> {
     let exe = std::env::current_exe().context("finding the rigg binary")?;
     let argv = job.argv();
     println!("rigg {}", argv.join(" "));
-    let status = Command::new(&exe)
+    let mut cmd = Command::new(&exe);
+    if let Some(ch) = &job.channel {
+        cmd.env("RIGG_NOTIFY_CHANNEL", ch);
+    }
+    let status = cmd
         .args(&argv)
         .current_dir(&job.repo)
         .env("PWD", &job.repo)
@@ -661,6 +776,74 @@ mod tests {
         assert_eq!(n[1].stamp(), "2027-02-01 00:00");
     }
 
+    fn job(id: &str, declared: bool) -> Job {
+        Job {
+            id: id.into(),
+            schedule: "0 7 * * *".into(),
+            repo: "/tmp/r".into(),
+            pipeline: Some("p".into()),
+            task: None,
+            kind: "run".into(),
+            vars: Vec::new(),
+            channel: None,
+            source: declared.then(|| "/tmp/r".to_string()),
+            paused: false,
+            created: None,
+            last_run: None,
+            last_status: None,
+            last_detail: None,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn a_declaration_is_written_back_as_state_only() {
+        // What `save` would put in cron.json for a declared job: no schedule,
+        // no pipeline - only what the instance is entitled to remember.
+        let mut j = job("r/nightly", true);
+        j.paused = true;
+        j.last_status = Some("ok".into());
+        let row = Job {
+            id: j.id.clone(),
+            schedule: String::new(),
+            repo: String::new(),
+            pipeline: None,
+            task: None,
+            kind: String::new(),
+            vars: Vec::new(),
+            channel: None,
+            source: j.source.clone(),
+            paused: j.paused,
+            created: j.created.clone(),
+            last_run: j.last_run.clone(),
+            last_status: j.last_status.clone(),
+            last_detail: j.last_detail.clone(),
+            pid: j.pid,
+        };
+        let text = serde_json::to_string(&row).unwrap();
+        assert!(!text.contains("0 7 * * *"), "definition leaked into state: {text}");
+        assert!(text.contains("\"paused\":true"), "{text}");
+        assert!(text.contains("ok"), "{text}");
+    }
+
+    #[test]
+    fn a_declared_job_knows_it_is_declared() {
+        assert!(job("r/nightly", true).declared());
+        assert!(!job("typed", false).declared());
+    }
+
+    #[test]
+    fn ids_are_namespaced_so_two_repos_can_both_have_nightly() {
+        let a = job("amino/nightly", true);
+        let b = job("herdr/nightly", true);
+        assert_ne!(a.id, b.id);
+        // The `/` nests the log under logs/<repo>/, which spawn_runner creates.
+        let (la, lb) = (log_path(&a.id), log_path(&b.id));
+        assert_ne!(la, lb);
+        assert!(la.ends_with("logs/amino/nightly.log"), "{}", la.display());
+        assert!(lb.ends_with("logs/herdr/nightly.log"), "{}", lb.display());
+    }
+
     #[test]
     fn a_run_job_is_the_argv_a_person_would_have_typed() {
         let j = Job {
@@ -671,6 +854,8 @@ mod tests {
             task: None,
             kind: "run".into(),
             vars: Vec::new(),
+            channel: None,
+            source: None,
             paused: false,
             created: None,
             last_run: None,
