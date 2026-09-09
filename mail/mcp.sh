@@ -12,21 +12,19 @@ cd "$(dirname "$0")/.."
 : "${RIGG_INSTANCE:=default}"
 export RIGG_INSTANCE
 
-secrets="$HOME/.rigg/secrets/$RIGG_INSTANCE.env"
-if [ -f "$secrets" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "$secrets"
-  set +a
-fi
-# Set from Slack, and not templated by Ansible, so it survives a converge and
-# wins on a clash.
-if [ -f "${secrets%.env}.local.env" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "${secrets%.env}.local.env"
-  set +a
-fi
+# One directory per instance. rigg exports these itself; this is for the
+# standalone case.
+inst_dir="$HOME/.rigg/instances/$RIGG_INSTANCE"
+for f in "$inst_dir/secrets.env" "$inst_dir/secrets.local.env"; do
+  if [ -f "$f" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$f"
+    set +a
+  fi
+done
+: "${RIGG_MAIL_DIR:=$inst_dir/corpus}"
+export RIGG_MAIL_DIR
 
 # stdout is the protocol here, so uv must not chat on it.
 exec uv run --quiet --with "requests~=2.34" --with "mcp~=2.2" mail/mail_mcp.py

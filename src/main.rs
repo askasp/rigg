@@ -1,5 +1,7 @@
 mod config;
+mod cron;
 mod headless;
+mod instance;
 mod media;
 mod model;
 mod pipeline;
@@ -317,11 +319,99 @@ enum Cmd {
     },
     /// Check that the environment can actually drive agents.
     Doctor,
+    /// Show, set or remove this instance's secrets.
+    Secret {
+        #[command(subcommand)]
+        cmd: Option<SecretCmd>,
+    },
+    /// Schedules for this instance.
+    Cron {
+        #[command(subcommand)]
+        cmd: Option<CronCmd>,
+    },
+    /// Fire whatever is due this minute. One crontab line per instance.
+    Tick {
+        /// Pretend it is this time instead of now.
+        #[arg(long)]
+        at: Option<String>,
+        /// Say what would fire, start nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage a stack of dependent branches.
     Stack {
         #[command(subcommand)]
         cmd: StackCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum SecretCmd {
+    /// Store a secret for this instance.
+    Set { name: String, value: String },
+    /// Remove one this instance set.
+    Rm { name: String },
+    /// List them, masked.
+    List,
+}
+
+#[derive(Subcommand)]
+enum CronCmd {
+    /// Add a schedule: `rigg cron add "0 7 * * *" --pipeline morning-mail`.
+    Add {
+        /// Five cron fields, or an @alias, followed by an optional task.
+        words: Vec<String>,
+        #[arg(long)]
+        pipeline: Option<String>,
+        /// The task, if it was not typed after the schedule.
+        #[arg(long)]
+        task: Option<String>,
+        /// Cut a branch and stack the work instead of running in place.
+        #[arg(long)]
+        new: bool,
+        /// The repo to run in. Defaults to the one you are standing in.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Set a placeholder for every run of this job. Repeatable.
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// Name the job. Defaults to one derived from what it runs.
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Change a schedule that already exists.
+    Edit {
+        id: String,
+        #[arg(long)]
+        schedule: Option<String>,
+        #[arg(long)]
+        pipeline: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[arg(long)]
+        pause: bool,
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Remove one.
+    Rm { id: String },
+    /// Run one now, down the same path a tick takes.
+    Run {
+        id: String,
+        /// Internal: a tick already recorded the start.
+        #[arg(long, hide = true)]
+        fired: bool,
+    },
+    /// Everything about one job, including its log.
+    Show { id: String },
+    /// Print the job ids, one per line, for shell completion.
+    Names,
+    /// List them.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -460,7 +550,12 @@ fn rewrite_pipeline_prefix(mut argv: Vec<String>) -> Vec<String> {
         return argv;
     }
     let first = argv[1].clone();
-    if first.starts_with('-') || !PIPELINE_VERBS.contains(&argv[2].as_str()) {
+    // `cron add` and `cron run` are subcommands, not a pipeline called cron.
+    const NOT_A_PIPELINE: [&str; 4] = ["cron", "secret", "stack", "tick"];
+    if first.starts_with('-')
+        || NOT_A_PIPELINE.contains(&first.as_str())
+        || !PIPELINE_VERBS.contains(&argv[2].as_str())
+    {
         return argv;
     }
     argv.remove(1);
@@ -519,9 +614,20 @@ fn real_main() -> Result<()> {
         
     }
 
+    instance::export()?;
+
+    // Instance state is not repo state, so these work from anywhere.
+    match cli.cmd {
+        Cmd::Secret { cmd } => return secret_cmd(cmd),
+        Cmd::Cron { cmd } => return cron_cmd(cmd),
+        Cmd::Tick { at, dry_run } => return tick_cmd(at.as_deref(), dry_run),
+        _ => {}
+    }
+
     let root = util::repo_root()?;
 
     match cli.cmd {
+        Cmd::Secret { .. } | Cmd::Cron { .. } | Cmd::Tick { .. } => unreachable!("handled above"),
         Cmd::Keys { .. } => unreachable!("handled above"),
         Cmd::Init { force } => {
             let [preferred, legacy] = Config::candidates(&root);
@@ -2387,6 +2493,8 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
             bail!("no steps matched --only");
         }
     }
+    missing_secrets(&cfg, &steps)?;
+
     let mut needs_task = false;
     for step in &steps {
         if let Some(p) = step.prompt_text(&cfg.dir)? {
@@ -3114,6 +3222,300 @@ fn prune(
     Ok(())
 }
 
+
+/// Refuse a run whose roles are missing a token, before any turn is spent.
+fn missing_secrets(cfg: &Config, steps: &[config::Step]) -> Result<()> {
+    let have = instance::secrets();
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for step in steps {
+        let Some(role) = &step.agent else { continue };
+        let Some(a) = cfg.agents.get(role) else { continue };
+        for n in &a.needs {
+            if !have.get(n).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                && !instance::set_in_env(n)
+            {
+                missing.push((role.clone(), n.clone()));
+            }
+        }
+    }
+    missing.dedup();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::new();
+    for (role, n) in &missing {
+        msg.push_str(&format!("role `{role}` needs {n}, which instance `{}` does not have\n", instance::name()));
+    }
+    for (_, n) in &missing {
+        msg.push_str(&format!("  rigg secret set {n} <value>\n"));
+    }
+    bail!("{}", msg.trim_end());
+}
+
+fn secret_cmd(cmd: Option<SecretCmd>) -> Result<()> {
+    match cmd.unwrap_or(SecretCmd::List) {
+        SecretCmd::Set { name, value } => {
+            instance::set_secret(&name, &value)?;
+            println!("{name} set for instance `{}`", instance::name());
+            println!("{}", instance::local_path().display());
+        }
+        SecretCmd::Rm { name } => {
+            if instance::rm_secret(&name)? {
+                println!("{name} removed");
+            } else if instance::provenance(&name) == "from the vault" {
+                bail!("{name} comes from the vault; remove it there");
+            } else {
+                bail!("{name} is not set for instance `{}`", instance::name());
+            }
+        }
+        SecretCmd::List => {
+            let all = instance::secrets();
+            println!("instance {}  {}", instance::name(), instance::dir().display());
+            if all.is_empty() {
+                println!("\nno secrets yet:  rigg secret set NAME value");
+                return Ok(());
+            }
+            println!();
+            for (k, v) in &all {
+                println!("  {k:<28} {:<10} {}", instance::mask(v), instance::provenance(k));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Split a typed schedule from the task that followed it.
+fn split_schedule(words: &[String]) -> Result<(String, Option<String>)> {
+    if words.is_empty() {
+        bail!("a schedule, and what to run:  rigg cron add \"0 7 * * *\" --pipeline morning-mail");
+    }
+    if words[0].starts_with('@') {
+        let task = words[1..].join(" ");
+        return Ok((words[0].clone(), (!task.is_empty()).then_some(task)));
+    }
+    // A quoted schedule arrives as one word; an unquoted one as five.
+    let parts: Vec<&str> = words[0].split_whitespace().collect();
+    if parts.len() == 5 {
+        let task = words[1..].join(" ");
+        return Ok((words[0].trim().to_string(), (!task.is_empty()).then_some(task)));
+    }
+    if words.len() < 5 {
+        bail!(
+            "a schedule is five fields - minute hour day month weekday - and this has {}",
+            words.len()
+        );
+    }
+    let task = words[5..].join(" ");
+    Ok((words[..5].join(" "), (!task.is_empty()).then_some(task)))
+}
+
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn cron_cmd(cmd: Option<CronCmd>) -> Result<()> {
+    match cmd.unwrap_or(CronCmd::List) {
+        CronCmd::Add { words, pipeline, task, new, repo, vars, id } => {
+            let (schedule, typed) = split_schedule(&words)?;
+            let expr = cron::Expr::parse(&schedule)?;
+            let task = task.or(typed);
+            if pipeline.is_none() && task.is_none() {
+                bail!("nothing to run: give it --pipeline, or a task after the schedule");
+            }
+            let repo = match repo {
+                Some(r) => std::fs::canonicalize(&r)
+                    .with_context(|| format!("{r} is not there"))?
+                    .display()
+                    .to_string(),
+                None => util::repo_root()?.display().to_string(),
+            };
+            let mut jobs = cron::load()?;
+            let base = id.unwrap_or_else(|| {
+                slug(pipeline.as_deref().or(task.as_deref()).unwrap_or("job"))
+            });
+            let mut name = base.clone();
+            let mut n = 2;
+            while jobs.iter().any(|j| j.id == name) {
+                name = format!("{base}-{n}");
+                n += 1;
+            }
+            let job = cron::Job {
+                id: name.clone(),
+                schedule: schedule.clone(),
+                repo,
+                pipeline,
+                task,
+                kind: if new { "new".into() } else { "run".into() },
+                vars,
+                paused: false,
+                created: Some(cron::now(None)?.stamp()),
+                last_run: None,
+                last_status: None,
+                last_detail: None,
+                pid: None,
+            };
+            println!("{}  {}", job.id, job.describe());
+            let next = expr.next(&cron::now(None)?, 3);
+            println!("  {schedule}");
+            for w in &next {
+                println!("  next  {}", w.stamp());
+            }
+            jobs.push(job);
+            cron::save(&jobs)?;
+            if !crontab_has_tick() {
+                println!("\nNothing is knocking yet. Add one crontab line:");
+                println!("  * * * * * {} {} tick", cron_sh_path(), instance::name());
+            }
+        }
+        CronCmd::Edit { id, schedule, pipeline, task, repo, vars, pause, resume } => {
+            let mut jobs = cron::load()?;
+            let target = cron::find(&jobs, &id)?.id.clone();
+            if let Some(s) = &schedule {
+                cron::Expr::parse(s)?;
+            }
+            let job = jobs.iter_mut().find(|j| j.id == target).expect("just found");
+            if let Some(s) = schedule {
+                job.schedule = s;
+                // A schedule that had stopped parsing is worth a clean slate.
+                if job.last_status.as_deref() == Some("bad-schedule") {
+                    job.last_status = None;
+                    job.last_detail = None;
+                }
+            }
+            if let Some(p) = pipeline {
+                job.pipeline = if p.is_empty() { None } else { Some(p) };
+            }
+            if let Some(t) = task {
+                job.task = if t.is_empty() { None } else { Some(t) };
+            }
+            if let Some(r) = repo {
+                job.repo = std::fs::canonicalize(&r)
+                    .with_context(|| format!("{r} is not there"))?
+                    .display()
+                    .to_string();
+            }
+            if !vars.is_empty() {
+                job.vars = vars;
+            }
+            if pause {
+                job.paused = true;
+            }
+            if resume {
+                job.paused = false;
+            }
+            let line = format!("{}  {}  {}", job.id, job.schedule, job.describe());
+            let paused = job.paused;
+            cron::save(&jobs)?;
+            println!("{line}{}", if paused { "  [paused]" } else { "" });
+        }
+        CronCmd::Rm { id } => {
+            let mut jobs = cron::load()?;
+            let target = cron::find(&jobs, &id)?.id.clone();
+            jobs.retain(|j| j.id != target);
+            cron::save(&jobs)?;
+            println!("{target} removed");
+        }
+        CronCmd::Run { id, fired } => {
+            let jobs = cron::load()?;
+            let target = cron::find(&jobs, &id)?.id.clone();
+            cron::run_job(&target, fired)?;
+        }
+        CronCmd::Show { id } => {
+            let jobs = cron::load()?;
+            let job = cron::find(&jobs, &id)?;
+            println!("{}", job.id);
+            println!("  schedule  {}{}", job.schedule, if job.paused { "  [paused]" } else { "" });
+            println!("  runs      rigg {}", job.argv().join(" "));
+            println!("  in        {}", job.repo);
+            if let Some(w) = cron::Expr::parse(&job.schedule).ok().and_then(|e| e.next(&cron::now(None).ok()?, 1).into_iter().next()) {
+                println!("  next      {}", w.stamp());
+            }
+            if let Some(r) = &job.last_run {
+                println!("  last      {r}  {}", job.last_status.as_deref().unwrap_or("?"));
+            }
+            if let Some(d) = &job.last_detail {
+                println!("            {d}");
+            }
+            let log = cron::log_path(&job.id);
+            if log.exists() {
+                println!("  log       {}", log.display());
+            }
+        }
+        CronCmd::Names => {
+            for j in cron::load()? {
+                println!("{}", j.id);
+            }
+        }
+        CronCmd::List => {
+            let jobs = cron::load()?;
+            println!("instance {}  {}", instance::name(), instance::cron_path().display());
+            if jobs.is_empty() {
+                println!("\nnothing scheduled:  rigg cron add \"0 7 * * *\" --pipeline morning-mail");
+                return Ok(());
+            }
+            let now = cron::now(None)?;
+            println!();
+            for j in &jobs {
+                let next = match cron::Expr::parse(&j.schedule) {
+                    Ok(e) => e
+                        .next(&now, 1)
+                        .first()
+                        .map(|w| w.stamp())
+                        .unwrap_or_else(|| "never".into()),
+                    Err(_) => "BAD SCHEDULE".into(),
+                };
+                let next = if j.paused { "paused".to_string() } else { next };
+                println!("  {:<20} {:<16} {:<18} {}", j.id, j.schedule, next, j.describe());
+                if let (Some(r), Some(st)) = (&j.last_run, &j.last_status) {
+                    println!("  {:<20} last {r}  {st}{}", "", j.last_detail.as_deref().map(|d| format!("  {d}")).unwrap_or_default());
+                }
+            }
+            if !crontab_has_tick() {
+                println!("\nNothing is knocking. Add:  * * * * * {} {} tick", cron_sh_path(), instance::name());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cron_sh_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent()?.parent()?.parent().map(|r| r.join("cron.sh")))
+        .filter(|p| p.exists())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "/path/to/rigg/cron.sh".into())
+}
+
+/// Whether anything is actually knocking. A schedule nobody calls is the one
+/// failure that looks exactly like a job that has not come round yet.
+fn crontab_has_tick() -> bool {
+    std::process::Command::new("crontab")
+        .arg("-l")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(" tick"))
+        .unwrap_or(false)
+}
+
+fn tick_cmd(at: Option<&str>, dry_run: bool) -> Result<()> {
+    let fired = cron::tick(at, dry_run)?;
+    for f in &fired {
+        println!("{}: {}", f.id, f.why);
+    }
+    Ok(())
+}
+
 fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
     let mut problems = 0;
     let cfg = Config::load(root, cfg_path);
@@ -3136,6 +3538,29 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
         } else {
             println!("{label:<14} {bin} NOT ON PATH");
             problems += 1;
+        }
+    }
+
+    let have = instance::secrets();
+    println!("instance       {} ({})", instance::name(), instance::dir().display());
+    if let Ok(c) = &cfg {
+        let mut wanted: Vec<(&String, &String)> = Vec::new();
+        for (role, a) in &c.agents {
+            for n in &a.needs {
+                wanted.push((role, n));
+            }
+        }
+        for (role, n) in wanted {
+            let label = format!("secret {n}");
+            if have.get(n).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+                println!("{label:<14} {} ({})", instance::mask(&have[n]), instance::provenance(n));
+            } else if instance::set_in_env(n) {
+                println!("{label:<14} from the environment");
+            } else {
+                println!("{label:<14} MISSING - role `{role}` needs it");
+                println!("{:<14} rigg secret set {n} <value>", "");
+                problems += 1;
+            }
         }
     }
 

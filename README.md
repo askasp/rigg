@@ -712,26 +712,138 @@ replies to draft from — built and kept current from the channel with
 `@rigg corpus add mail`, and searchable from there too, so what a scheduled
 draft will be shown can be read before the schedule fires.
 
+## Where things live
+
+Three places hold everything, and rigg is the only thing that reads all three.
+
+| plane | where | holds | lifetime |
+| --- | --- | --- | --- |
+| capability | `<repo>/.rigg/` | pipelines, roles, prompts, the API surfaces a role may hold | versioned, reviewed in a PR |
+| identity | `~/.rigg/instances/<inst>/` | secrets, schedules, notes, corpora | never committed, one directory per tenant |
+| activity | `.git/rigg/` | stacks, run status, logs, threads | disposable, rebuildable |
+
+The planes never reach into each other. A pipeline names a secret and never
+contains one; an instance holds a schedule and never holds a pipeline. Which
+instance is in play is `RIGG_INSTANCE`, `default` when nothing says otherwise.
+
+An older layout filed the same state by kind — `secrets/<inst>.env` beside
+`cron/<inst>.json` beside `mail/<inst>.db`. rigg moves that into the instance
+directory the first time it sees it.
+
+## Secrets
+
+```sh
+rigg secret                              # masked, with where each came from
+rigg secret set FRONT_API_TOKEN eyJ...   # stored 0600 for this instance
+rigg secret rm FRONT_API_TOKEN
+```
+
+Two files, and the second wins: `secrets.env` is templated by Ansible from a
+vault and rewritten whole by a converge, `secrets.local.env` is what `rigg
+secret set` writes and survives one. Both are read into the environment of
+every agent turn, shell step and MCP server a run starts. An inherited value
+wins over both, so a one-off `FRONT_API_TOKEN=... rigg run` still overrides.
+
+A role says what it cannot start without, by name:
+
+```toml
+[agents.mailer]
+kind = "claude"
+needs = ["FRONT_API_TOKEN"]
+args = ["--permission-mode", "auto",
+        "--mcp-config", ".rigg/mcp/front.json", "--strict-mcp-config",
+        "--allowedTools", "mcp__mail"]
+```
+
+`rigg doctor` then answers the day the role is written rather than at 07:04,
+and a run whose roles are missing a token refuses before spending a turn:
+
+```
+role `mailer` needs FRONT_API_TOKEN, which instance `default` does not have
+  rigg secret set FRONT_API_TOKEN <value>
+```
+
 ## On a schedule
 
-Scheduling is cron's job, not rigg's — there is no daemon here and no reason to
-grow one. What a scheduled run needs is the environment cron will not give it:
+There is no daemon. One crontab line per instance knocks once a minute, and
+rigg decides what is due:
 
 ```
-0 7 * * * /home/aksel/git/rigg/cron.sh amino ~/git/amino-monorepo \
-          new morning-mail "draft replies to anything unanswered overnight"
+* * * * * /home/aksel/git/rigg/cron.sh amino tick
 ```
 
-`cron.sh <instance> <repo> <rigg args...>` supplies a PATH with `uv` and the
-agent on it, the instance's tokens, and `RIGG_INSTANCE`, then runs the command
-in that repo. `new` returns immediately and runs detached, so the crontab entry
-does not sit there holding the run.
+`cron.sh <instance> [repo] <rigg args...>` supplies the PATH cron withholds and
+the instance's tokens. Everything else is rigg:
+
+```sh
+rigg cron add "*/15 * * * *" --pipeline corpus-sync
+rigg cron add "0 7 * * *" "draft replies to anything unanswered overnight"
+rigg cron add "0 3 * * *" --pipeline corpus-backfill --var since=2026-05-01
+rigg cron                            # what is scheduled, and when each runs next
+rigg cron edit morning-mail --schedule "0 8 * * *"
+rigg cron edit morning-mail --pause  # and --resume
+rigg cron run morning-mail           # now, down the path a tick takes
+rigg cron show morning-mail          # including where its log is
+rigg cron rm morning-mail
+```
+
+The schedule is five fields or an `@alias`, and can be typed unquoted with the
+task after it — `rigg cron add 0 7 \* \* \* draft replies` — which is the
+form a chat message arrives in. Day-of-month and day-of-week are Vixie's OR
+when both are named: `0 0 1 * mon` is the first of the month *and* every
+Monday.
+
+A job runs `rigg run --pipeline <name>` in its repo by default; `--new` cuts a
+branch and stacks the work instead. `rigg tick` starts each due job detached
+and returns in milliseconds, so a twenty-minute job does not hold the minute
+open, and a job still running when its next firing comes round is skipped
+rather than started twice.
+
+Because the schedule is rigg's rather than a thread inside something else, it
+can be asked what it would do:
+
+```sh
+rigg tick --at "2026-09-10 07:00" --dry-run
+```
+
+```
+morning-mail: would run: rigg run --pipeline mail-draft --task draft replies to anything unanswered overnight
+```
 
 Two things to know before scheduling one. A pipeline with a `confirm` step
-cannot run unattended at all — rigg says so rather than skipping the step — so
-schedule one without. And a run nobody started from Slack has no thread to
-report in: set `RIGG_NOTIFY_CHANNEL` in the instance's env file and the notify
-hook posts to that channel instead, or the run reports nowhere.
+cannot run unattended at all — rigg says so rather than skipping the step. And
+a run nobody started from Slack has no thread to report in: set
+`RIGG_NOTIFY_CHANNEL` in the instance's secrets and the notify hook posts to
+that channel instead.
+
+## A corpus is a pipeline, not a subsystem
+
+Giving an agent a body of past work to draft from needs nothing rigg does not
+already have. Ingest is a shell step on a schedule; search is a tool a role
+holds. `mail/` is the sidecar that knows about Front and SQLite — rigg knows
+only which directory belongs to this instance, which it passes as
+`RIGG_MAIL_DIR`.
+
+```toml
+[[pipelines.corpus-sync.steps]]
+id = "sync"
+run = "/path/to/rigg/mail/run.sh"
+
+[[pipelines.mail-draft.steps]]
+id = "draft"
+agent = "mailer"
+clear = true
+prompt = "{{task}}\n\nUse mcp__mail__search_replies to find how questions like this were answered before."
+```
+
+```sh
+rigg cron add "*/15 * * * *" --pipeline corpus-sync
+rigg run --pipeline mail-draft --task "reply to the HRV question"
+```
+
+So there is no corpus registry to keep in step with reality and nothing
+long-lived to keep it fresh — the schedule already does that, and `rigg doctor`
+stats the file. See [`mail/`](mail/README.md) for what it ingests.
 
 ## Things worth knowing
 

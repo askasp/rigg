@@ -82,6 +82,10 @@ pub struct AgentCfg {
     /// appended as the last argument.
     #[serde(default)]
     pub command: Option<Vec<String>>,
+    /// Secrets this role cannot work without, by name. The value lives in the
+    /// instance; naming it here lets `rigg doctor` answer before a run.
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 impl Step {

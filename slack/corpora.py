@@ -182,8 +182,8 @@ def _ranking():
 
 
 def store_path(inst: str | None = None) -> Path:
-    root = Path(os.environ.get("RIGG_CORPUS_DIR") or (Path.home() / ".rigg" / "corpus"))
-    return root / f"{inst or instance()}.json"
+    root = Path(os.environ.get("RIGG_HOME") or (Path.home() / ".rigg"))
+    return root / "instances" / (inst or instance()) / "corpus.json"
 
 
 def load(inst: str | None = None) -> list[dict]:

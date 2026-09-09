@@ -176,6 +176,7 @@ mod tests {
             kind: kind.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             command: None,
+            needs: Vec::new(),
         }
     }
 

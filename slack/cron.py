@@ -220,8 +220,8 @@ def learned(output: str) -> list[str]:
 
 
 def notes_path(inst: str | None = None) -> Path:
-    root = Path(os.environ.get("RIGG_NOTES_DIR") or (Path.home() / ".rigg" / "notes"))
-    return root / f"{inst or instance()}.md"
+    root = Path(os.environ.get("RIGG_HOME") or (Path.home() / ".rigg"))
+    return root / "instances" / (inst or instance()) / "notes.md"
 
 
 def note(lines: list[str], job: dict) -> list[str]:
@@ -274,8 +274,8 @@ def instance() -> str:
 
 
 def store_path(inst: str | None = None) -> Path:
-    root = Path(os.environ.get("RIGG_CRON_DIR") or (Path.home() / ".rigg" / "cron"))
-    return root / f"{inst or instance()}.json"
+    root = Path(os.environ.get("RIGG_HOME") or (Path.home() / ".rigg"))
+    return root / "instances" / (inst or instance()) / "cron.json"
 
 
 def load(inst: str | None = None) -> list[dict]:

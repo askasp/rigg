@@ -9,6 +9,12 @@ _rigg_stacks() {
   _describe 'stack' names
 }
 
+_rigg_cron_jobs() {
+  local -a names
+  names=(${(f)"$(rigg cron names 2>/dev/null)"})
+  _describe 'job' names
+}
+
 _rigg_branches() {
   local -a names
   names=(${(f)"$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null)"})
@@ -31,7 +37,12 @@ _rigg() {
     'plan:Show the steps a run would take, and on which model'
     'pipelines:List the pipeline names'
     'features:Show the optional parts of the pipeline'
+    'ask:Ask a question about the code, changing nothing'
     'doctor:Check the environment'
+    'secret:Show, set or remove this instance's secrets'
+    'cron:Schedules for this instance'
+    'tick:Fire whatever is due this minute'
+    'keys:Show the shell keybindings and aliases'
     'stack:Manage stacks'
     'init:Write a starter rigg.toml'
   )
@@ -48,6 +59,11 @@ _rigg() {
     add|say|attach|logs|stop|continue) (( CURRENT == 3 )) && _rigg_stacks ;;
     adopt) (( CURRENT == 3 )) && _rigg_branches ;;
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
+    secret) (( CURRENT == 3 )) && _values 'subcommand' set rm list ;;
+    cron)
+      (( CURRENT == 3 )) && _values 'subcommand' add edit rm run show list names
+      (( CURRENT == 4 )) && [[ "${words[3]}" != "add" ]] && _rigg_cron_jobs
+      ;;
   esac
 }
 

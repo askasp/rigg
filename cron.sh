@@ -1,46 +1,30 @@
 #!/usr/bin/env bash
 #
-# Run a rigg command on a schedule, with an instance's environment.
+# Run a rigg command with an instance's environment.
 #
-#   cron.sh <instance> <repo> <rigg args...>
+#   cron.sh <instance> tick                 # what a crontab line calls
+#   cron.sh <instance> <repo> <rigg args>   # anything else, in that repo
 #
-# A crontab line then reads as the command you would have typed:
-#
-#   0 7 * * * /home/aksel/git/rigg/cron.sh amino ~/git/amino-monorepo \
-#             new morning-mail "draft replies to anything unanswered overnight"
-#
-# cron hands a process almost nothing: no PATH to uv or the agent, none of the
-# instance's tokens, and no Slack thread to report progress in. This supplies
-# all three. Set RIGG_NOTIFY_CHANNEL in the instance's env file and the run
-# reports there, since there is no thread for the notify hook to reply in.
-#
-# A pipeline with a `confirm` step cannot run unattended — rigg says so rather
-# than skipping the step — so schedule one that has none.
-#
-# Under a systemd timer, prefer `run --pipeline <name>` (foreground) or add
-# `--fg` to `new`. `new` detaches under setsid, and a Type=oneshot unit takes
-# its whole cgroup down the moment this script exits — killing the run it just
-# started. Plain crontab does not do that, but the flag is harmless there.
+# cron hands a process almost nothing: no PATH to uv or the agent, and none of
+# the instance's tokens. This supplies both.
 set -euo pipefail
 
-usage() { echo "usage: cron.sh <instance> <repo> <rigg args...>" >&2; exit 2; }
-[ $# -ge 3 ] || usage
-inst="$1"; repo="$2"; shift 2
+usage() { echo "usage: cron.sh <instance> [repo] <rigg args...>" >&2; exit 2; }
+[ $# -ge 2 ] || usage
+inst="$1"; shift
+
+repo=""
+if [ -d "$1" ]; then repo="$1"; shift; fi
+[ $# -ge 1 ] || usage
 
 here="$(cd "$(dirname "$0")" && pwd)"
 export RIGG_INSTANCE="$inst"
-
-# cron's PATH is /usr/bin:/bin and nothing else.
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/snap/bin:$PATH"
 
-# The unnamed instance is `default` here but `slack/.env` on disk, the same
-# spelling `slack/run.sh` uses.
-slack_env="$here/slack/$inst.env"
-[ "$inst" = "default" ] && slack_env="$here/slack/.env"
-
-for f in "$HOME/.rigg/secrets/$inst.env" \
-         "$HOME/.rigg/secrets/$inst.local.env" \
-         "$slack_env"; do
+# rigg loads the instance's secrets itself; these are for the shell steps and
+# MCP servers it starts before that takes effect.
+inst_dir="$HOME/.rigg/instances/$inst"
+for f in "$inst_dir/secrets.env" "$inst_dir/secrets.local.env"; do
   if [ -f "$f" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -49,5 +33,5 @@ for f in "$HOME/.rigg/secrets/$inst.env" \
   fi
 done
 
-cd "$repo"
+[ -n "$repo" ] && cd "$repo"
 exec "${RIGG_BIN:-$here/target/release/rigg}" "$@"

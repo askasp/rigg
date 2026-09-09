@@ -10,8 +10,8 @@ library one for everything in the process, slack_bolt included.
 
 Two files, one per instance, both sourced by everything a run touches:
 
-    ~/.rigg/secrets/<instance>.env         Ansible writes this from the vault
-    ~/.rigg/secrets/<instance>.local.env   this writes this one
+    ~/.rigg/instances/<instance>/secrets.env        Ansible writes this from the vault
+    ~/.rigg/instances/<instance>/secrets.local.env  this writes this one
 
 They are separate on purpose. The Ansible role templates the first from
 `vault_rigg_tokens`, so anything written there from chat would vanish on the
@@ -40,17 +40,19 @@ def instance() -> str:
     return os.environ.get("RIGG_INSTANCE") or "default"
 
 
-def _dir() -> Path:
-    return Path(os.environ.get("RIGG_SECRETS_DIR") or (Path.home() / ".rigg" / "secrets"))
+def _dir(inst: str | None = None) -> Path:
+    """One directory per instance, the layout `rigg secret` writes."""
+    root = Path(os.environ.get("RIGG_HOME") or (Path.home() / ".rigg"))
+    return root / "instances" / (inst or instance())
 
 
 def managed_path(inst: str | None = None) -> Path:
     """The one Ansible owns. Read here, never written."""
-    return _dir() / f"{inst or instance()}.env"
+    return _dir(inst) / "secrets.env"
 
 
 def local_path(inst: str | None = None) -> Path:
-    return _dir() / f"{inst or instance()}.local.env"
+    return _dir(inst) / "secrets.local.env"
 
 
 def _read(path: Path) -> dict[str, str]:
