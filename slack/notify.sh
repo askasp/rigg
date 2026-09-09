@@ -33,6 +33,15 @@ fi
 [ -n "$channel" ] || channel="${RIGG_NOTIFY_CHANNEL:-}"
 [ -n "$channel" ] || exit 0
 
+# A run started from Slack has a thread, and progress there is what somebody
+# asked for. A run nobody started - a timer - has none, and "main started -
+# 1 step(s)" in a channel is noise nobody reads, which is how the one message
+# that matters gets missed. So without a thread, only failure is worth saying;
+# what a scheduled run has to report, it reports itself.
+if [ -z "$thread" ] && [ "${RIGG_EVENT:-}" != "failed" ]; then
+  [ "${RIGG_STATUS:-}" = "failed" ] || exit 0
+fi
+
 # A failing post must not fail the run, so every error here is swallowed.
 curl -sf -X POST "$API" \
   -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
