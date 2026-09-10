@@ -153,6 +153,7 @@ class Channel:
     def __init__(self, name: str, raw: dict):
         self.name = name
         self.repo = Path(raw["repo"]).expanduser()
+        self.target = raw.get("target")
         # Absent means every command; a list narrows it, e.g. ["stacks", "logs"]
         # for a channel that should be able to look but not launch.
         allowed = raw.get("commands")
@@ -169,14 +170,54 @@ class Channel:
         return self.commands is None or bool(self.commands & MUTATING)
 
 
+def channels_from_rigg() -> dict[str, dict] | None:
+    """What `rigg channels --json` says, or None if rigg has no config repo.
+
+    The mapping belongs with the rest of the capability, so the bridge asks
+    rather than keeping its own copy - the same rule that made `cron` a
+    translation. `channels.toml` stays as the answer for an instance that has
+    not moved to a config repo.
+    """
+    try:
+        r = subprocess.run(
+            ["rigg", "channels", "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        rows = json.loads(r.stdout)
+    except ValueError:
+        return None
+    if not rows:
+        return None
+    out = {}
+    for row in rows:
+        if not row.get("repo"):
+            continue
+        out[row["channel"]] = {
+            "repo": row["repo"],
+            "target": row.get("target"),
+            "commands": row.get("commands"),
+        }
+    return out or None
+
+
 class Config:
     def __init__(self, path: Path):
         self.path = path
-        self.mtime = path.stat().st_mtime
-        with path.open("rb") as fh:
-            raw = tomllib.load(fh)
+        self.mtime = path.stat().st_mtime if path.exists() else 0.0
+        raw_channels = channels_from_rigg()
+        self.source = "rigg channels"
+        if raw_channels is None:
+            self.source = str(path)
+            with path.open("rb") as fh:
+                raw = tomllib.load(fh)
+            raw_channels = raw.get("channels", {})
         self.channels: dict[str, Channel] = {
-            name: Channel(name, c) for name, c in raw.get("channels", {}).items()
+            name: Channel(name, c) for name, c in raw_channels.items()
         }
         for name, ch in self.channels.items():
             if not (ch.repo / ".git").exists():
@@ -191,9 +232,16 @@ class Config:
         was only friction.
         """
         try:
-            if self.path.stat().st_mtime == self.mtime:
+            # A config repo can change under us with no local file touched, so
+            # an mtime match is only conclusive when the file is the source.
+            if self.source == str(self.path) and self.path.stat().st_mtime == self.mtime:
                 return self
             fresh = Config(self.path)
+            if fresh.source == self.source and len(fresh.channels) == len(self.channels) \
+               and all(n in self.channels and
+                       self.channels[n].repo == c.repo for n, c in fresh.channels.items()):
+                self.mtime = fresh.mtime
+                return self
         # SystemExit is not an Exception, and Config raises it for a repo that
         # is not there - which is exactly the typo this must survive.
         except (Exception, SystemExit) as e:
@@ -204,7 +252,7 @@ class Config:
             except OSError:
                 pass
             return self
-        print(f"channels.toml reloaded - {len(fresh.channels)} channel(s): "
+        print(f"channels reloaded from {fresh.source} - {len(fresh.channels)} channel(s): "
               f"{', '.join('#' + n for n in fresh.channels)}")
         return fresh
 

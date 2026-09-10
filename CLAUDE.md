@@ -6,19 +6,24 @@ pipeline unattended.
 
 ## The rule that decides where things go
 
-> **A repo holds capability. An instance holds identity. A checkout holds
-> activity.**
+> **A config repo holds capability. A target repo holds the subject. An
+> instance holds identity. A checkout holds activity.**
 
-rigg is the only thing that reads all three. Nothing else may reach across.
+rigg is the only thing that reads all four. Nothing else may reach across.
 
-| plane | where | holds | lifetime |
+| role | where | holds | lifetime |
 | --- | --- | --- | --- |
-| capability | `<repo>/.rigg/` | pipelines, roles, prompts, mcp surfaces, approvals, schedules | versioned, reviewed in a PR |
-| identity | `~/.rigg/instances/<inst>/` | secrets, notes, corpora, outbox, logs, the repos it covers, and the *state* of declared schedules | never committed, one dir per tenant |
+| capability | `<config repo>/.rigg/` | pipelines, roles, prompts, mcp surfaces, approvals, schedules, targets, channels | versioned, one repo per instance |
+| subject | a target repo | the code acted on. **No `.rigg` of its own** | not rigg's to own |
+| identity | `~/.rigg/instances/<inst>/` | secrets, notes, corpora, outbox, logs, the config repo it reads, and the *state* of declared schedules | never committed, one dir per tenant |
 | activity | `<git-common-dir>/rigg/` | stacks, run status, logs, thread map | disposable, rebuildable |
 
-Before adding state anywhere, name its plane. If it does not fit one, it is
+Before adding state anywhere, name its role. If it does not fit one, it is
 probably two things.
+
+`rigg config-repo set <path>` is what names the config repo. Without one rigg
+falls back to reading `.rigg/` from whatever repo you stand in, which is how
+rigg's own repo and any un-migrated repo keep working.
 
 **Worked examples.** A pipeline that ingests mail → capability, so the repo. The
 token it needs → identity, so the instance; the repo names it and never holds
@@ -28,27 +33,37 @@ tenant, not to a repo.
 
 ## Two more rules that follow from it
 
+**Two roots, so a relative path must say which.** Capability lives in the
+config repo, the cwd of every step is the target — agent turns, `run =`, git
+operations, `changed_files`, all of them. A step reaching for something
+vendored in the config repo addresses it with **`{{config}}`**
+(`run = "{{config}}/tools/mail/run.sh"`); `$RIGG_CONFIG` is the same path for
+the places that get no `{{var}}` substitution, such as `[notify]` and an
+approval's `run`. A bare `./.rigg/...` means the target, and in a migrated
+setup the target has no `.rigg` — so it is always a bug.
+
 **Every Slack command is `rigg` plus the same words.** The bridge translates a
 message into an argv and renders what comes back. It owns no logic. If the
 bridge needs a verb rigg does not have, that is a bug in rigg — add the verb.
 
-**A repo declares its schedules; the instance holds their state.** `[[schedules]]`
-in `.rigg/rigg.toml` is read from the repo's **main checkout only** — never a
+**The config repo declares the schedules; the instance holds their state.**
+`[[schedules]]` is read from the config repo's **main checkout only** — never a
 worktree, for the reason GitHub schedules only from the default branch: rigg cuts
 a worktree per branch, and reading all of them would let any branch change when
-things run. An instance runs a repo's schedules only once `rigg repo add`
-registers it, and a repo belongs to exactly one instance — two would double-fire
-with neither able to say why.
+things run. A schedule names its `target`; omitting it runs in the config repo,
+which is what a job acting on an API rather than a repo wants.
 
-`rigg cron add` is unchanged and is not deprecated: typed jobs need no PR and are
-the right answer for what you want this week. `rigg cron export` turns one into a
+`rigg cron add` is unchanged and is not deprecated: typed jobs need no review and
+are the right answer for what you want this week — and because `--repo` is taken
+verbatim, a typed job is also how you fire a work-in-progress config on the real
+cron before merging it. `rigg cron export` turns one into a
 `[[schedules]]` block when it has earned permanence. `rigg cron edit`/`rm` refuse
 a declared job and name the file instead.
 
-**Nothing in a repo's config may name an absolute path.** A tool a pipeline
-runs is vendored into `<repo>/.rigg/tools/` and named relatively, so a clone
-works on somebody else's machine and the checkout is a complete description of
-what rigg can do there. `rigg corpus enable` does the copying. The duplication
+**Nothing in a config may name an absolute path.** A tool a pipeline runs is
+vendored into `<config repo>/.rigg/tools/` and addressed with `{{config}}`, so
+a clone works on somebody else's machine and the config repo is a complete
+description of what rigg can do. `rigg corpus enable` does the copying. The duplication
 is deliberate: with one consumer it costs nothing, and a second one is when the
 shared interface becomes knowable rather than guessed. There is no tool search
 path, no install step and no `$PATH` convention to learn — that was considered
@@ -56,19 +71,21 @@ and rejected as a third way to find things.
 
 **Identity is typed and takes effect now; capability is written and reviewed.**
 `rigg secret set` and `rigg cron add` mutate instance state immediately.
-Anything that changes what an agent *can do* writes a diff into `<repo>/.rigg/`
-and leaves it uncommitted. Never silently mutate a repo's capability.
+Anything that changes what an agent *can do* writes a diff into the config
+repo's `.rigg/` and leaves it uncommitted. Never silently mutate capability.
 
 ## Where to put a new thing
 
 | you are adding | it goes in | rebuild? |
 | --- | --- | --- |
-| a pipeline, role, prompt, feature, var | `<repo>/.rigg/rigg.toml` | no |
+| a pipeline, role, prompt, feature, var | `<config repo>/.rigg/rigg.toml` | no |
+| a repo for rigg to act on | `[targets.<name>]` in the config repo | no |
+| a Slack channel | `[channels.<name>]` in the config repo | no |
 | a corpus kind | a sidecar directory with a `corpus.toml` | no |
-| a tool a pipeline runs | `<repo>/.rigg/tools/` — `rigg corpus enable` copies it there | no |
+| a tool a pipeline runs | `<config repo>/.rigg/tools/` — `rigg corpus enable` copies it there | no |
 | a tool surface for an agent | an MCP server + `.rigg/mcp/*.json` | no |
-| an approval action | `[approvals.<name>]` in the repo config | no |
-| a schedule that must survive a rebuild | `[[schedules]]` in the repo | no |
+| an approval action | `[approvals.<name>]` in the config repo | no |
+| a schedule that must survive a rebuild | `[[schedules]]` in the config repo | no |
 | an ad-hoc schedule | `rigg cron add` — no PR, fires next tick | no |
 | a secret | `rigg secret set` | no |
 | an agent kind | `[agents.x] command = [...]` | no |

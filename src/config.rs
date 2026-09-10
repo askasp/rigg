@@ -43,6 +43,15 @@ pub struct Config {
     /// it runs; the instance holds only the state of these.
     #[serde(default)]
     pub schedules: Vec<ScheduleCfg>,
+    /// The repos this config acts on. A target holds no rigg config of its
+    /// own, so anything repo-shaped that a pipeline needs - trunk, frontend
+    /// globs, a teardown - is named here instead of in [stack].
+    #[serde(default)]
+    pub targets: BTreeMap<String, TargetCfg>,
+    /// Which Slack channel drives which target. The bridge reads this through
+    /// `rigg channels`; it holds no mapping of its own.
+    #[serde(default)]
+    pub channels: BTreeMap<String, ChannelCfg>,
     /// Directory the config was loaded from; `prompt_file` paths resolve
     /// against it.
     #[serde(skip)]
@@ -65,8 +74,50 @@ pub struct ScheduleCfg {
     /// Where it reports, for a run that has no Slack thread to reply in.
     #[serde(default)]
     pub channel: Option<String>,
+    /// Which [targets.*] it runs against. Omitted means the config repo
+    /// itself, which is what a job acting on an API rather than a repo wants.
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+}
+
+/// A repo this config acts on. Every field but `path` overrides the same one
+/// in [stack]; unset means inherit.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TargetCfg {
+    pub path: String,
+    #[serde(default)]
+    pub trunk: Option<String>,
+    #[serde(default)]
+    pub preview_label: Option<String>,
+    #[serde(default)]
+    pub frontend_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub worktree_dir: Option<String>,
+    #[serde(default)]
+    pub teardown: Option<String>,
+    #[serde(default)]
+    pub push_when_done: Option<bool>,
+}
+
+impl TargetCfg {
+    pub fn dir(&self) -> PathBuf {
+        PathBuf::from(crate::util::expand_home(&self.path))
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCfg {
+    /// The target it drives. Omitted means the config repo, for a channel that
+    /// only runs pipelines acting on an API.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Verbs this channel may run. Omitted means all of them.
+    #[serde(default)]
+    pub commands: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -276,15 +327,85 @@ impl Config {
         }
     }
 
+    /// Where capability comes from. The instance names a config repo, and
+    /// everything rigg can do is declared there - a target repo holds none of
+    /// its own. Falling back to the cwd's own `.rigg` is what keeps a repo
+    /// that has not been migrated, and rigg's own, working unchanged.
+    pub fn source_root(root: &Path) -> PathBuf {
+        match crate::instance::config_repo() {
+            Some(c) if Self::candidates(&c).iter().any(|p| p.exists()) => c,
+            _ => root.to_path_buf(),
+        }
+    }
+
+    /// Canonicalised so `~/git/x`, `/home/a/git/x` and a symlinked path all
+    /// name the same target; a checkout that matches none is not an error, it
+    /// just gets [stack] unchanged.
+    pub fn target_for(&self, root: &Path) -> Option<(&str, &TargetCfg)> {
+        let want = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        self.targets.iter().find_map(|(name, t)| {
+            let d = t.dir();
+            let d = std::fs::canonicalize(&d).unwrap_or(d);
+            (d == want).then_some((name.as_str(), t))
+        })
+    }
+
+    /// [stack] with the matching target's overrides layered on.
+    pub fn stack_for(&self, root: &Path) -> StackCfg {
+        let mut st = self.stack.clone();
+        let Some((_, t)) = self.target_for(root) else {
+            return st;
+        };
+        if let Some(v) = &t.trunk {
+            st.trunk = v.clone();
+        }
+        if let Some(v) = &t.preview_label {
+            st.preview_label = Some(v.clone());
+        }
+        if let Some(v) = &t.frontend_paths {
+            st.frontend_paths = v.clone();
+        }
+        if let Some(v) = &t.worktree_dir {
+            st.worktree_dir = Some(v.clone());
+        }
+        if let Some(v) = &t.teardown {
+            st.teardown = Some(v.clone());
+        }
+        if let Some(v) = t.push_when_done {
+            st.push_when_done = v;
+        }
+        st
+    }
+
+    /// Where a schedule or channel that names this target runs. An unnamed
+    /// target is the config repo itself - a pipeline acting on an API has no
+    /// repo to stand in, and the config repo is the one directory guaranteed
+    /// to be there.
+    pub fn target_dir(&self, name: Option<&str>) -> Result<PathBuf> {
+        let Some(n) = name else {
+            return Ok(self
+                .dir
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| self.dir.clone()));
+        };
+        let t = self
+            .targets
+            .get(n)
+            .with_context(|| format!("no [targets.{n}] in {}", self.dir.display()))?;
+        Ok(t.dir())
+    }
+
     pub fn load(root: &Path, explicit: Option<&str>) -> Result<Self> {
+        let source = Self::source_root(root);
         let mut path = match explicit {
             Some(p) => PathBuf::from(p),
-            None => Self::path_for(root),
+            None => Self::path_for(&source),
         };
         // A worktree checked out before the config was committed will not have
         // one, so fall back to the primary checkout's.
         if !path.exists() && explicit.is_none() {
-            if let Ok(main) = crate::util::main_checkout(root) {
+            if let Ok(main) = crate::util::main_checkout(&source) {
                 if let Some(alt) = Self::candidates(&main).into_iter().find(|p| p.exists()) {
                     path = alt;
                 }
@@ -305,6 +426,10 @@ impl Config {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| root.to_path_buf());
         cfg.validate()?;
+        // Resolved once, here, so every `cfg.stack.*` read downstream is
+        // already the target's - a call site that forgot to ask would
+        // otherwise silently get amino's trunk while standing somewhere else.
+        cfg.stack = cfg.stack_for(root);
         Ok(cfg)
     }
 
@@ -524,6 +649,38 @@ impl Config {
                 bail!("step `{}` has a prompt but no `agent`", step.id);
             }
         }
+
+        let mut seen: BTreeMap<PathBuf, &str> = BTreeMap::new();
+        for (name, t) in &self.targets {
+            let d = t.dir();
+            let key = std::fs::canonicalize(&d).unwrap_or_else(|_| d.clone());
+            if let Some(other) = seen.insert(key, name) {
+                bail!(
+                    "targets `{other}` and `{name}` are the same directory ({}) - \
+                     a run standing there could not say which it is",
+                    d.display()
+                );
+            }
+        }
+        for s in &self.schedules {
+            if let Some(t) = &s.target {
+                if !self.targets.contains_key(t) {
+                    let known: Vec<&str> = self.targets.keys().map(|k| k.as_str()).collect();
+                    bail!(
+                        "schedule `{}` names target `{t}`, which is not declared. Known: {}",
+                        s.id,
+                        if known.is_empty() { "none".into() } else { known.join(", ") }
+                    );
+                }
+            }
+        }
+        for (ch, c) in &self.channels {
+            if let Some(t) = &c.target {
+                if !self.targets.contains_key(t) {
+                    bail!("channel `{ch}` names target `{t}`, which is not declared");
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -543,6 +700,25 @@ args = ["--permission-mode", "acceptEdits"]
 # A second model is the point of a Copilot-style review, without the round trip.
 # [agents.reviewer]
 # kind = "opencode"
+
+# The repos this config acts on. A target holds no .rigg of its own, so
+# anything repo-shaped a pipeline needs is named here; every field but `path`
+# overrides the same one in [stack], and unset means inherit.
+#
+# [targets.app]
+# path = "~/git/app"
+# trunk = "main"
+# frontend_paths = ["web/**"]
+
+# Which Slack channel drives which target. The bridge reads this through
+# `rigg channels`; a channel naming no target runs against this repo, which is
+# what a pipeline acting on an API rather than code wants.
+#
+# [channels.rigg-tasks]
+# target = "app"
+# [channels.read-only]
+# target = "app"
+# commands = ["stacks", "logs", "help"]
 
 [stack]
 trunk = "main"
@@ -617,17 +793,27 @@ confirm = true
 
 pub const README: &str = r#"# .rigg
 
-What this repo lets an agent do. Three places hold everything, and rigg is the
-only thing that reads all three:
+What an agent may do, and to what. Four places hold everything, and rigg is the
+only thing that reads all four:
 
-| plane | where | holds |
+| role | where | holds |
 | --- | --- | --- |
-| capability | `.rigg/` (here) | pipelines, roles, prompts, mcp surfaces, approvals |
-| identity | `~/.rigg/instances/<inst>/` | secrets, schedules, notes, corpora |
+| capability | `.rigg/` (here) | pipelines, roles, prompts, mcp surfaces, approvals, schedules, targets |
+| subject | a target repo | the code acted on. No `.rigg` of its own |
+| identity | `~/.rigg/instances/<inst>/` | secrets, notes, corpora, schedule state |
 | activity | `.git/rigg/` | stacks, run status, logs |
 
-The planes never reach into each other. **This directory names a secret; it
-never contains one.** An instance holds a schedule; it never holds a pipeline.
+They never reach into each other. **This directory names a secret; it never
+contains one.** An instance holds a schedule's state; it never holds a pipeline.
+
+When an instance names this repo (`rigg config-repo set`), it is the only
+place capability is read from, and `[targets.*]` says which repos it acts on.
+Two rules keep the two roots apart:
+
+- **The cwd of every step is the target repo** - agent turns, `run =`, git.
+- **`{{config}}` addresses this directory**, for a tool or mcp file vendored
+  here: `run = "{{config}}/tools/mail/run.sh"`. `$RIGG_CONFIG` is the same
+  path, for the places that get no `{{var}}` substitution.
 
 ## What goes here
 
@@ -684,3 +870,134 @@ For each finding: the file and line, what breaks, and the smallest change that
 fixes it. If you find nothing worth changing, say so in one line rather than
 inventing something.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // RIGG_HOME is process-wide, and these tests set it.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rigg-cfg-{tag}-{}", crate::util::random_name()));
+        std::fs::create_dir_all(d.join(".rigg")).unwrap();
+        d
+    }
+
+    fn write(root: &Path, body: &str) {
+        std::fs::write(root.join(".rigg").join("rigg.toml"), body).unwrap();
+    }
+
+    const MIN: &str = "[agents.a]\nkind = \"claude\"\n";
+
+    #[test]
+    fn a_config_repo_supplies_capability_a_target_does_not_have() {
+        let _g = ENV.lock().unwrap();
+        let home = scratch("home");
+        let conf = scratch("conf");
+        let target = scratch("target");
+        write(&conf, &format!("{MIN}\n[pipelines.mail-drafts]\nsteps = []\n"));
+        std::fs::remove_dir_all(target.join(".rigg")).unwrap();
+
+        std::env::set_var("RIGG_HOME", &home);
+        std::env::set_var("RIGG_INSTANCE", "t");
+        crate::instance::set_config_repo(&conf).unwrap();
+
+        let cfg = Config::load(&target, None).unwrap();
+        assert!(cfg.pipelines.contains_key("mail-drafts"));
+        std::env::remove_var("RIGG_HOME");
+    }
+
+    #[test]
+    fn the_config_repo_wins_over_a_stray_rigg_dir_in_the_target() {
+        let _g = ENV.lock().unwrap();
+        let home = scratch("home2");
+        let conf = scratch("conf2");
+        let target = scratch("target2");
+        write(&conf, &format!("{MIN}\n[pipelines.from-config]\nsteps = []\n"));
+        write(&target, &format!("{MIN}\n[pipelines.from-target]\nsteps = []\n"));
+
+        std::env::set_var("RIGG_HOME", &home);
+        std::env::set_var("RIGG_INSTANCE", "t");
+        crate::instance::set_config_repo(&conf).unwrap();
+
+        let cfg = Config::load(&target, None).unwrap();
+        assert!(cfg.pipelines.contains_key("from-config"));
+        assert!(!cfg.pipelines.contains_key("from-target"));
+        std::env::remove_var("RIGG_HOME");
+    }
+
+    #[test]
+    fn with_no_config_repo_the_repo_you_stand_in_still_loads() {
+        let _g = ENV.lock().unwrap();
+        let home = scratch("home3");
+        let target = scratch("target3");
+        write(&target, &format!("{MIN}\n[pipelines.local]\nsteps = []\n"));
+
+        std::env::set_var("RIGG_HOME", &home);
+        std::env::set_var("RIGG_INSTANCE", "t");
+        let cfg = Config::load(&target, None).unwrap();
+        assert!(cfg.pipelines.contains_key("local"));
+        std::env::remove_var("RIGG_HOME");
+    }
+
+    #[test]
+    fn a_target_overrides_only_what_it_names() {
+        let _g = ENV.lock().unwrap();
+        let home = scratch("home4");
+        let conf = scratch("conf4");
+        let target = scratch("target4");
+        write(
+            &conf,
+            &format!(
+                "{MIN}\n[stack]\ntrunk = \"main\"\npreview_label = \"preview\"\n\n\
+                 [targets.t]\npath = \"{}\"\ntrunk = \"develop\"\n",
+                target.display()
+            ),
+        );
+        std::env::set_var("RIGG_HOME", &home);
+        std::env::set_var("RIGG_INSTANCE", "t");
+        crate::instance::set_config_repo(&conf).unwrap();
+
+        let cfg = Config::load(&target, None).unwrap();
+        assert_eq!(cfg.stack.trunk, "develop");
+        assert_eq!(cfg.stack.preview_label.as_deref(), Some("preview"));
+
+        let elsewhere = scratch("elsewhere4");
+        let cfg = Config::load(&elsewhere, None).unwrap();
+        assert_eq!(cfg.stack.trunk, "main");
+        std::env::remove_var("RIGG_HOME");
+    }
+
+    #[test]
+    fn a_schedule_with_no_target_runs_in_the_config_repo() {
+        let conf = scratch("conf5");
+        write(&conf, MIN);
+        let mut cfg: Config = toml::from_str(MIN).unwrap();
+        cfg.dir = conf.join(".rigg");
+        assert_eq!(cfg.target_dir(None).unwrap(), conf);
+    }
+
+    #[test]
+    fn two_targets_on_one_directory_are_refused() {
+        let d = scratch("dup");
+        let body = format!(
+            "{MIN}\n[targets.a]\npath = \"{p}\"\n\n[targets.b]\npath = \"{p}\"\n",
+            p = d.display()
+        );
+        let cfg: Config = toml::from_str(&body).unwrap();
+        let e = cfg.validate().unwrap_err().to_string();
+        assert!(e.contains("same directory"), "{e}");
+    }
+
+    #[test]
+    fn a_schedule_naming_an_undeclared_target_is_refused_by_name() {
+        let body = format!(
+            "{MIN}\n[[schedules]]\nid = \"s\"\ncron = \"0 7 * * *\"\ntask = \"x\"\ntarget = \"nope\"\n"
+        );
+        let cfg: Config = toml::from_str(&body).unwrap();
+        let e = cfg.validate().unwrap_err().to_string();
+        assert!(e.contains("nope"), "{e}");
+    }
+}

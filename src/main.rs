@@ -330,6 +330,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<RepoCmd>,
     },
+    /// The repo capability is read from: pipelines, prompts, tools, schedules.
+    #[command(name = "config-repo")]
+    ConfigRepo {
+        #[command(subcommand)]
+        cmd: Option<ConfigRepoCmd>,
+    },
+    /// Which Slack channel drives which target, for the bridge to read.
+    Channels {
+        /// Machine-readable, for the bridge.
+        #[arg(long)]
+        json: bool,
+    },
     /// Corpora a role can be given: what is available, and wiring one in.
     Corpus {
         #[command(subcommand)]
@@ -374,6 +386,16 @@ enum RepoCmd {
     Rm { path: Option<String> },
     /// What this instance covers.
     List,
+}
+
+#[derive(Subcommand)]
+enum ConfigRepoCmd {
+    /// Point this instance at a config repo.
+    Set { path: String },
+    /// Go back to reading `.rigg/` from whatever repo you stand in.
+    Clear,
+    /// What is in force.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -670,13 +692,22 @@ fn real_main() -> Result<()> {
         Cmd::Cron { cmd } => return cron_cmd(cmd),
         Cmd::Tick { at, dry_run } => return tick_cmd(at.as_deref(), dry_run),
         Cmd::Repo { cmd } => return repo_cmd(cmd),
+        Cmd::ConfigRepo { cmd } => return config_repo_cmd(cmd),
+        // Before repo_root(): the bridge asks for this from wherever it was
+        // started, and with a config repo set there is nothing to stand in.
+        Cmd::Channels { json } => return channels_cmd(cli.config.as_deref(), json),
         _ => {}
     }
 
     let root = util::repo_root()?;
 
     match cli.cmd {
-        Cmd::Secret { .. } | Cmd::Cron { .. } | Cmd::Tick { .. } | Cmd::Repo { .. } => {
+        Cmd::Secret { .. }
+        | Cmd::Cron { .. }
+        | Cmd::Tick { .. }
+        | Cmd::Repo { .. }
+        | Cmd::ConfigRepo { .. }
+        | Cmd::Channels { .. } => {
             unreachable!("handled above")
         }
         Cmd::Corpus { cmd } => corpus_cmd(&root, cli.config.as_deref(), cmd)?,
@@ -1021,6 +1052,7 @@ fn real_main() -> Result<()> {
 
             let mut vars = BTreeMap::new();
             vars.insert("repo".into(), root.to_string_lossy().to_string());
+            vars.insert("config".into(), cfg.dir.to_string_lossy().to_string());
             vars.insert("branch".into(), util::current_branch(&root).unwrap_or_default());
             let step = config::Step {
                 id: "ask".into(),
@@ -1428,6 +1460,7 @@ fn real_main() -> Result<()> {
             let mut vars = BTreeMap::new();
             vars.insert("branch".into(), entry.branch.clone());
             vars.insert("repo".into(), dir.to_string_lossy().to_string());
+            vars.insert("config".into(), cfg.dir.to_string_lossy().to_string());
             let step = config::Step {
                 id: "say".into(),
                 agent: Some(role),
@@ -1577,13 +1610,7 @@ fn worktree_dest(cfg: &Config, main: &std::path::Path, branch: &str) -> std::pat
 }
 
 fn shellexpand_home(p: &str) -> String {
-    match p.strip_prefix("~/") {
-        Some(rest) => match std::env::var("HOME") {
-            Ok(h) => format!("{h}/{rest}"),
-            Err(_) => p.to_string(),
-        },
-        None => p.to_string(),
-    }
+    util::expand_home(p)
 }
 
 /// Choose a stack interactively: one stack needs no choosing, fzf is used when
@@ -2406,6 +2433,7 @@ fn teardown(cfg: &Config, dir: &str, branch: &str, base: &str, dry_run: bool) {
     vars.insert("branch".to_string(), branch.to_string());
     vars.insert("base".to_string(), base.to_string());
     vars.insert("repo".to_string(), dir.to_string());
+    vars.insert("config".to_string(), cfg.dir.to_string_lossy().to_string());
     let cmd = util::render(cmd, &vars);
     // Naming the branch, not the command: a teardown is usually a script, and
     // its first line is `set -eu` for every branch alike.
@@ -2618,6 +2646,9 @@ fn execute(root: &std::path::Path, cfg_path: Option<&str>, o: RunOpts) -> Result
     vars.insert("branch".into(), branch.clone());
     vars.insert("base".into(), base.clone());
     vars.insert("repo".into(), root.to_string_lossy().to_string());
+    // Capability lives in the config repo, the cwd is the target - so a step
+    // reaching for a vendored tool must say which root it means.
+    vars.insert("config".into(), cfg.dir.to_string_lossy().to_string());
 
     // Pushing or opening a PR from the trunk onto itself is a footgun; a purely
     // local pipeline on the trunk is fine.
@@ -3466,6 +3497,103 @@ fn a_repo(path: Option<String>) -> Result<std::path::PathBuf> {
     Ok(util::main_checkout(&root).unwrap_or(root))
 }
 
+fn config_repo_cmd(cmd: Option<ConfigRepoCmd>) -> Result<()> {
+    match cmd.unwrap_or(ConfigRepoCmd::Show) {
+        ConfigRepoCmd::Set { path } => {
+            let p = std::path::PathBuf::from(util::expand_home(&path));
+            let p = std::fs::canonicalize(&p)
+                .with_context(|| format!("{} is not there", p.display()))?;
+            if !Config::candidates(&p).iter().any(|c| c.exists()) {
+                bail!("{} has no .rigg/rigg.toml - run `rigg init` in it first", p.display());
+            }
+            instance::set_config_repo(&p)?;
+            let cfg = Config::load(&p, None)?;
+            println!("instance `{}` reads capability from {}", instance::name(), p.display());
+            println!(
+                "  {} pipeline(s), {} target(s), {} schedule(s)",
+                cfg.pipelines.len(),
+                cfg.targets.len(),
+                cfg.schedules.len()
+            );
+        }
+        ConfigRepoCmd::Clear => {
+            if instance::clear_config_repo()? {
+                println!("cleared; rigg reads .rigg/ from the repo you stand in again");
+            } else {
+                println!("no config repo was set");
+            }
+        }
+        ConfigRepoCmd::Show => match instance::config_repo() {
+            None => {
+                println!("no config repo: rigg reads .rigg/ from the repo you stand in");
+                println!("  set one:  rigg config-repo set <path>");
+            }
+            Some(p) => {
+                println!("instance {}  {}", instance::name(), p.display());
+                match Config::load(&p, None) {
+                    Err(e) => println!("  does not load: {e:#}"),
+                    Ok(cfg) => {
+                        println!();
+                        for (name, t) in &cfg.targets {
+                            let d = t.dir();
+                            let state = if d.is_dir() { "" } else { "   MISSING" };
+                            println!("  target {name:<14} {}{state}", d.display());
+                        }
+                        if cfg.targets.is_empty() {
+                            println!("  no [targets.*] declared");
+                        }
+                    }
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// The bridge holds no channel map of its own; it asks for this.
+fn channels_cmd(cfg_path: Option<&str>, json: bool) -> Result<()> {
+    let root = match instance::config_repo() {
+        Some(c) => c,
+        None => util::repo_root()?,
+    };
+    let cfg = Config::load(&root, cfg_path)?;
+    if json {
+        let out: Vec<serde_json::Value> = cfg
+            .channels
+            .iter()
+            .map(|(name, c)| {
+                let dir = cfg.target_dir(c.target.as_deref()).ok();
+                serde_json::json!({
+                    "channel": name,
+                    "target": c.target,
+                    "repo": dir.map(|d| d.display().to_string()),
+                    "commands": c.commands,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if cfg.channels.is_empty() {
+        println!("no [channels.*] in {}", cfg.dir.display());
+        return Ok(());
+    }
+    for (name, c) in &cfg.channels {
+        let dir = cfg.target_dir(c.target.as_deref());
+        let where_ = match dir {
+            Ok(d) if d.is_dir() => d.display().to_string(),
+            Ok(d) => format!("{}   MISSING", d.display()),
+            Err(e) => format!("{e:#}"),
+        };
+        let verbs = match &c.commands {
+            Some(v) => format!("  [{}]", v.join(" ")),
+            None => String::new(),
+        };
+        println!("  #{name:<20} {where_}{verbs}");
+    }
+    Ok(())
+}
+
 fn repo_cmd(cmd: Option<RepoCmd>) -> Result<()> {
     match cmd.unwrap_or(RepoCmd::List) {
         RepoCmd::Add { path } => {
@@ -3864,6 +3992,37 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
     let mut problems = 0;
     let cfg = Config::load(root, cfg_path);
 
+    // Which of the two roots is which is the thing most worth saying first:
+    // every relative path in the config is read against one of them.
+    match instance::config_repo() {
+        None => println!("config repo    none - reading .rigg/ from {}", root.display()),
+        Some(c) => {
+            if Config::candidates(&c).iter().any(|p| p.exists()) {
+                println!("config repo    {}", c.display());
+            } else {
+                println!("config repo    {} has no .rigg/rigg.toml - IGNORED", c.display());
+                problems += 1;
+            }
+        }
+    }
+    if let Ok(c) = &cfg {
+        for (name, t) in &c.targets {
+            let d = t.dir();
+            let label = format!("  target {name}");
+            if d.is_dir() {
+                let here = c
+                    .target_for(root)
+                    .map(|(n, _)| n == name)
+                    .unwrap_or(false);
+                let mark = if here { "   <- you are here" } else { "" };
+                println!("{label:<14} {}{mark}", d.display());
+            } else {
+                println!("{label:<14} {} MISSING", d.display());
+                problems += 1;
+            }
+        }
+    }
+
     // Each step is one non-interactive turn, so the only thing to check per
     // role is that the binary it would spawn exists.
     let bins: Vec<(String, String)> = match &cfg {
@@ -3942,7 +4101,12 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
     if let Ok(c) = &cfg {
         if !c.schedules.is_empty() {
             let main = util::main_checkout(root).unwrap_or_else(|_| root.to_path_buf());
-            let covered = instance::repos().iter().any(|r| *r == main);
+            // With a config repo set there is only one place schedules are
+            // read from, so they run by definition - there is no second
+            // registration to forget, and saying otherwise while `rigg cron`
+            // lists them firing is the confusing kind of wrong.
+            let covered = instance::config_repo().is_some()
+                || instance::repos().iter().any(|r| *r == main);
             if !covered {
                 println!("schedules      {} declared, NOT RUN - rigg repo add", c.schedules.len());
                 problems += 1;
@@ -3958,10 +4122,15 @@ fn doctor(root: &std::path::Path, cfg_path: Option<&str>) -> Result<()> {
                         .unwrap_or_else(|| "never".into()),
                     _ => "BAD SCHEDULE".into(),
                 };
+                let where_ = match c.target_dir(sch.target.as_deref()) {
+                    Ok(d) if d.is_dir() => sch.target.clone().unwrap_or_else(|| "config repo".into()),
+                    Ok(_) => format!("{} MISSING", sch.target.as_deref().unwrap_or("?")),
+                    Err(_) => format!("no target {}", sch.target.as_deref().unwrap_or("?")),
+                };
                 if covered {
-                    println!("{label:<14} {} next {next}", sch.cron);
+                    println!("{label:<14} {} next {next}  -> {where_}", sch.cron);
                 } else {
-                    println!("{label:<14} {}", sch.cron);
+                    println!("{label:<14} {}  -> {where_}", sch.cron);
                 }
             }
         }

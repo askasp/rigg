@@ -21,6 +21,17 @@ pub fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
 }
 
 /// Repository root for the current working directory.
+/// `~/x` against $HOME. Config names paths the way a person writes them.
+pub fn expand_home(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(h) => format!("{h}/{rest}"),
+            Err(_) => p.to_string(),
+        },
+        None => p.to_string(),
+    }
+}
+
 pub fn repo_root() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let root = git(&cwd, &["rev-parse", "--show-toplevel"])

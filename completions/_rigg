@@ -42,6 +42,8 @@ _rigg() {
     'secret:Show, set or remove this instance's secrets'
     'cron:Schedules for this instance'
     'repo:Repos this instance covers'
+    'config-repo:The repo capability is read from'
+    'channels:Which Slack channel drives which target'
     'tick:Fire whatever is due this minute'
     'keys:Show the shell keybindings and aliases'
     'stack:Manage stacks'
@@ -62,6 +64,7 @@ _rigg() {
     stack) (( CURRENT == 3 )) && _values 'subcommand' push list names prune pr rm ;;
     secret) (( CURRENT == 3 )) && _values 'subcommand' set rm list ;;
     repo) (( CURRENT == 3 )) && _values 'subcommand' add rm list ;;
+    config-repo) (( CURRENT == 3 )) && _values 'subcommand' set clear show ;;
     cron)
       (( CURRENT == 3 )) && _values 'subcommand' add edit rm run show list names export
       (( CURRENT == 4 )) && [[ "${words[3]}" != "add" ]] && _rigg_cron_jobs

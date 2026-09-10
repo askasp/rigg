@@ -368,7 +368,8 @@ fn stored() -> Result<Vec<Job>> {
     serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
 }
 
-/// A repo's declared schedules, read from its main checkout.
+/// The declared schedules of the repo that supplies capability, read from its
+/// main checkout.
 ///
 /// Only the main checkout: rigg cuts a worktree per branch, and reading every
 /// one of them would let any feature branch change when things run - which is
@@ -387,7 +388,14 @@ fn declared_in(repo: &Path) -> Vec<Job> {
         .map(|s| Job {
             id: format!("{base}/{}", s.id),
             schedule: s.cron.clone(),
-            repo: root.display().to_string(),
+            // A schedule naming no target acts on an API rather than a repo,
+            // and runs in the config repo because that is the one directory
+            // certain to be there.
+            repo: cfg
+                .target_dir(s.target.as_deref())
+                .unwrap_or_else(|_| root.clone())
+                .display()
+                .to_string(),
             pipeline: s.pipeline.clone(),
             task: s.task.clone(),
             kind: s.kind.clone().unwrap_or_else(default_kind),
@@ -404,12 +412,22 @@ fn declared_in(repo: &Path) -> Vec<Job> {
         .collect()
 }
 
+/// The repos whose declarations this instance reads. With a config repo set
+/// that is the only one - capability lives in one place, so two repos
+/// declaring schedules would be the ambiguity the config repo exists to end.
+fn declaring_repos() -> Vec<std::path::PathBuf> {
+    match instance::config_repo() {
+        Some(c) => vec![c],
+        None => instance::repos(),
+    }
+}
+
 /// Every job this instance runs: typed ones as stored, declared ones as their
 /// repo says, each wearing whatever state the instance has recorded for it.
 pub fn load() -> Result<Vec<Job>> {
     let stored = stored()?;
     let mut out: Vec<Job> = Vec::new();
-    for repo in instance::repos() {
+    for repo in declaring_repos() {
         for mut job in declared_in(&repo) {
             if let Some(st) = stored.iter().find(|s| s.id == job.id) {
                 job.paused = st.paused;

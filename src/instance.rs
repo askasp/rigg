@@ -113,6 +113,39 @@ pub fn rm_repo(path: &std::path::Path) -> Result<bool> {
     Ok(true)
 }
 
+/// The repo that supplies capability: pipelines, prompts, tools, mcp surfaces,
+/// approvals, schedules and the targets they act on. One per instance.
+pub fn config_repo_path() -> PathBuf {
+    dir().join("config-repo")
+}
+
+pub fn config_repo() -> Option<PathBuf> {
+    let text = fs::read_to_string(config_repo_path()).ok()?;
+    let line = text.trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(line))
+}
+
+pub fn set_config_repo(path: &std::path::Path) -> Result<()> {
+    ensure_dir()?;
+    let p = config_repo_path();
+    let tmp = p.with_extension("tmp");
+    fs::write(&tmp, format!("{}\n", path.display()))?;
+    fs::rename(&tmp, &p).with_context(|| format!("writing {}", p.display()))?;
+    Ok(())
+}
+
+pub fn clear_config_repo() -> Result<bool> {
+    let p = config_repo_path();
+    if !p.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+    Ok(true)
+}
+
 pub fn notes_path() -> PathBuf {
     dir().join("notes.md")
 }
@@ -267,6 +300,9 @@ pub fn export() -> Result<()> {
     std::env::set_var("RIGG_INSTANCE", name());
     std::env::set_var("RIGG_MAIL_DIR", corpus_dir());
     std::env::set_var("RIGG_NOTES", notes_path());
+    if let Some(c) = config_repo() {
+        std::env::set_var("RIGG_CONFIG", c.join(".rigg"));
+    }
     for (k, v) in secrets() {
         if !set_in_env(&k) {
             std::env::set_var(&k, &v);
