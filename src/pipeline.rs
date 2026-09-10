@@ -151,7 +151,11 @@ impl Runner {
         }
 
         let role = step.agent.clone().expect("validated: prompt implies agent");
-        let acfg = self.cfg.agents[&role].clone();
+        // A role's flags carry paths too - `--mcp-config {{config}}/mcp/x.json`
+        // - and an unrendered one is the silent kind of broken: claude starts
+        // with no such file, the agent simply has no tools, and the step still
+        // reports ok.
+        let acfg = self.cfg.agents[&role].rendered(&self.vars);
         let raw = step.prompt_text(&self.cfg.dir)?.unwrap_or_default();
         let text = util::render(&raw, &self.vars);
 

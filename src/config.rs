@@ -120,6 +120,22 @@ pub struct ChannelCfg {
     pub commands: Option<Vec<String>>,
 }
 
+impl AgentCfg {
+    /// The role with `{{var}}` filled in. A role's flags carry paths too -
+    /// `--mcp-config {{config}}/mcp/x.json` - and leaving one unrendered is
+    /// the silent kind of broken: the agent starts with no such file, has no
+    /// tools, and the step still reports ok.
+    pub fn rendered(&self, vars: &BTreeMap<String, String>) -> Self {
+        let mut out = self.clone();
+        out.args = self.args.iter().map(|a| crate::util::render(a, vars)).collect();
+        out.command = self
+            .command
+            .as_ref()
+            .map(|c| c.iter().map(|a| crate::util::render(a, vars)).collect());
+        out
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Approval {
@@ -968,6 +984,17 @@ mod tests {
         let cfg = Config::load(&elsewhere, None).unwrap();
         assert_eq!(cfg.stack.trunk, "main");
         std::env::remove_var("RIGG_HOME");
+    }
+
+    #[test]
+    fn a_roles_flags_are_rendered_like_a_prompt() {
+        let a: AgentCfg = toml::from_str(
+            "kind = \"claude\"\nargs = [\"--mcp-config\", \"{{config}}/mcp/x.json\"]\n",
+        )
+        .unwrap();
+        let mut vars = BTreeMap::new();
+        vars.insert("config".to_string(), "/c/.rigg".to_string());
+        assert_eq!(a.rendered(&vars).args[1], "/c/.rigg/mcp/x.json");
     }
 
     #[test]
