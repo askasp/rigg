@@ -699,7 +699,17 @@ fn real_main() -> Result<()> {
         _ => {}
     }
 
-    let root = util::repo_root()?;
+    // Standing outside any repo is normal once capability lives in a config
+    // repo - `rigg doctor` is the deploy checklist, and having to cd somewhere
+    // first to read it is the kind of friction that makes people skip it.
+    // Only the commands that just describe the setup fall back; anything that
+    // acts on code still wants you to say which checkout you mean.
+    let describes_setup = matches!(cli.cmd, Cmd::Doctor | Cmd::Pipelines);
+    let root = match (util::repo_root(), instance::config_repo()) {
+        (Ok(r), _) => r,
+        (Err(_), Some(c)) if describes_setup => c,
+        (Err(e), _) => return Err(e),
+    };
 
     match cli.cmd {
         Cmd::Secret { .. }
