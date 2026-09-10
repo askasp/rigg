@@ -729,17 +729,72 @@ draft will be shown can be read before the schedule fires.
 
 ## Where things live
 
-Three places hold everything, and rigg is the only thing that reads all three.
+Four places hold everything, and rigg is the only thing that reads all four.
 
-| plane | where | holds | lifetime |
+| role | where | holds | lifetime |
 | --- | --- | --- | --- |
-| capability | `<repo>/.rigg/` | pipelines, roles, prompts, the API surfaces a role may hold | versioned, reviewed in a PR |
-| identity | `~/.rigg/instances/<inst>/` | secrets, schedules, notes, corpora | never committed, one directory per tenant |
+| capability | `<config repo>/.rigg/` | pipelines, roles, prompts, the API surfaces a role may hold, approvals, schedules, targets, channels | versioned |
+| subject | a target repo | the code acted on. No `.rigg` of its own | not rigg's to own |
+| identity | `~/.rigg/instances/<inst>/` | secrets, notes, corpora, schedule state | never committed, one directory per tenant |
 | activity | `.git/rigg/` | stacks, run status, logs, threads | disposable, rebuildable |
 
-The planes never reach into each other. A pipeline names a secret and never
-contains one; an instance holds a schedule and never holds a pipeline. Which
+They never reach into each other. A pipeline names a secret and never contains
+one; an instance holds a schedule's state and never holds a pipeline. Which
 instance is in play is `RIGG_INSTANCE`, `default` when nothing says otherwise.
+
+### One config repo, many targets
+
+An instance reads capability from one repo:
+
+```sh
+rigg config-repo set ~/git/rigg-config   # what rigg can do
+rigg config-repo                         # what is in force, and its targets
+rigg config-repo clear                   # back to the .rigg where you stand
+```
+
+Everything is declared there — including the repos it acts on, which hold no
+rigg config at all:
+
+```toml
+[targets.amino]
+path = "~/git/amino-monorepo"
+trunk = "main"                              # overrides [stack] for this one
+frontend_paths = ["frontend/**"]
+
+[channels.rigg-tasks]
+target = "amino"
+
+[channels.mail]                             # no target: acts on an API, runs here
+```
+
+That is what makes a pipeline reusable: it is written once and pointed at
+whichever target a channel or a schedule names.
+
+Two roots means a relative path has two possible meanings, so:
+
+- **the cwd of every step is the target** — agent turns, `run =`, git;
+- **`{{config}}` addresses the config repo**, for a tool vendored there:
+  `run = "{{config}}/tools/mail/run.sh"`. `$RIGG_CONFIG` is the same path for
+  the places that get no `{{var}}` substitution, such as `[notify]`.
+
+With no config repo set rigg reads `.rigg/` from the repo you stand in, exactly
+as it always did.
+
+### Deploying one
+
+```sh
+git clone <config repo> ~/git/rigg-config    # capability
+rigg config-repo set ~/git/rigg-config
+rigg secret set FRONT_API_TOKEN eyJ...       # identity, never in git
+rigg secret set SLACK_BOT_TOKEN xoxb-...
+rigg doctor                                  # names whatever is still missing
+crontab -e                                   # * * * * * .../cron.sh default tick
+systemctl --user start rigg-slack@default
+```
+
+A second machine is the same list. `rigg doctor` is the checklist: it names the
+config repo in force, every target and whether it is there, every secret a role
+declares, and when each schedule next fires.
 
 An older layout filed the same state by kind — `secrets/<inst>.env` beside
 `cron/<inst>.json` beside `mail/<inst>.db`. rigg moves that into the instance
