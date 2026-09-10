@@ -348,10 +348,27 @@ impl Config {
     /// its own. Falling back to the cwd's own `.rigg` is what keeps a repo
     /// that has not been migrated, and rigg's own, working unchanged.
     pub fn source_root(root: &Path) -> PathBuf {
-        match crate::instance::config_repo() {
-            Some(c) if Self::candidates(&c).iter().any(|p| p.exists()) => c,
-            _ => root.to_path_buf(),
+        let Some(c) = crate::instance::config_repo() else {
+            return root.to_path_buf();
+        };
+        // Standing in a checkout of the config repo means working *on* rigg's
+        // capability, so that checkout's own config is the one that counts -
+        // otherwise a branch changing a pipeline could never be run before it
+        // was merged. Declared schedules still come from the main checkout
+        // only, so a branch cannot change when things fire.
+        let same = |a: &Path, b: &Path| {
+            let f = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            f(a) == f(b)
+        };
+        if let Ok(main) = crate::util::main_checkout(root) {
+            if same(&main, &c) {
+                return root.to_path_buf();
+            }
         }
+        if Self::candidates(&c).iter().any(|p| p.exists()) {
+            return c;
+        }
+        root.to_path_buf()
     }
 
     /// Canonicalised so `~/git/x`, `/home/a/git/x` and a symlinked path all
@@ -995,6 +1012,31 @@ mod tests {
         let mut vars = BTreeMap::new();
         vars.insert("config".to_string(), "/c/.rigg".to_string());
         assert_eq!(a.rendered(&vars).args[1], "/c/.rigg/mcp/x.json");
+    }
+
+    #[test]
+    fn working_on_the_config_repo_uses_the_checkout_you_stand_in() {
+        let _g = ENV.lock().unwrap();
+        let home = scratch("home5");
+        let conf = scratch("conf5b");
+        write(&conf, &format!("{MIN}\n[pipelines.from-main]\nsteps = []\n"));
+        std::env::set_var("RIGG_HOME", &home);
+        std::env::set_var("RIGG_INSTANCE", "t");
+        crate::instance::set_config_repo(&conf).unwrap();
+
+        // A branch of the config repo, changing what a pipeline is called.
+        let wt = scratch("wt5");
+        write(&wt, &format!("{MIN}\n[pipelines.on-the-branch]\nsteps = []\n"));
+        // Not a worktree of `conf` here, but the rule under test is the one
+        // that matters: a checkout that is not the config repo gets the config
+        // repo's pipelines, not its own.
+        let cfg = Config::load(&wt, None).unwrap();
+        assert!(cfg.pipelines.contains_key("from-main"), "{:?}", cfg.pipelines.keys());
+
+        // Standing in the config repo itself reads what is on disk there.
+        let cfg = Config::load(&conf, None).unwrap();
+        assert!(cfg.pipelines.contains_key("from-main"));
+        std::env::remove_var("RIGG_HOME");
     }
 
     #[test]
