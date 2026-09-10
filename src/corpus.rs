@@ -52,8 +52,19 @@ impl Manifest {
     /// Where the sidecar sits once it is in the repo. Generated config points
     /// here and nowhere else - an absolute path into whoever ran `enable`
     /// would only work on their machine.
+    /// Where the sidecar sits, as rigg's own config text says it. rigg renders
+    /// `{{config}}` before running a step, so this reaches the config repo
+    /// rather than whatever checkout the step happens to run in.
     pub fn vendored(&self) -> String {
-        format!("./.rigg/tools/{}", self.name)
+        format!("{{{{config}}}}/tools/{}", self.name)
+    }
+
+    /// The same path for a reader that is not rigg. An mcp json is read by the
+    /// agent, which expands `${VAR}` and knows nothing of `{{config}}` - and a
+    /// relative path there resolves against the target, which is how a server
+    /// silently starts from a stale copy in the repo being worked on.
+    pub fn vendored_env(&self) -> String {
+        format!("${{RIGG_CONFIG}}/tools/{}", self.name)
     }
 
     fn rel(&self, cmd: &str) -> String {
@@ -188,7 +199,7 @@ pub fn mcp_json(m: &Manifest) -> String {
     format!(
         "{{\n  \"mcpServers\": {{\n    \"{}\": {{ \"command\": \"{}/{}\" }}\n  }}\n}}\n",
         m.name,
-        m.vendored(),
+        m.vendored_env(),
         m.mcp_command
     )
 }
@@ -297,12 +308,23 @@ mod tests {
     }
 
     #[test]
-    fn a_command_points_into_the_repo_without_losing_its_arguments() {
+    fn a_command_points_at_the_config_repo_without_losing_its_arguments() {
         assert_eq!(
             m().rel("run.sh --backfill --since {{since}}"),
-            "./.rigg/tools/mail/run.sh --backfill --since {{since}}"
+            "{{config}}/tools/mail/run.sh --backfill --since {{since}}"
         );
-        assert_eq!(m().rel("run.sh"), "./.rigg/tools/mail/run.sh");
+        assert_eq!(m().rel("run.sh"), "{{config}}/tools/mail/run.sh");
+    }
+
+    #[test]
+    fn an_mcp_command_uses_the_variable_the_agent_expands() {
+        // A `./` here resolves against the target repo, so the agent would
+        // start whatever stale copy that checkout happens to have - which
+        // looks exactly like the server working.
+        let j = mcp_json(&m());
+        assert!(!j.contains("./.rigg"), "{j}");
+        assert!(j.contains("${RIGG_CONFIG}"), "{j}");
+        assert!(!j.contains("{{config}}"), "{j}");
     }
 
     #[test]
@@ -311,7 +333,7 @@ mod tests {
         assert!(w.contains("needs = [\"FRONT_API_TOKEN\"]"), "{w}");
         assert!(w.contains("--allowedTools\", \"mcp__mail\""), "{w}");
         assert!(w.contains("[[pipelines.mail-sync.steps]]"), "{w}");
-        assert!(w.contains("./.rigg/tools/mail/run.sh --backfill"), "{w}");
+        assert!(w.contains("{{config}}/tools/mail/run.sh --backfill"), "{w}");
         assert!(!w.contains("/opt/rigg"), "no absolute path may reach the repo: {w}");
     }
 
@@ -324,6 +346,6 @@ mod tests {
     #[test]
     fn the_mcp_key_is_the_tool_prefix() {
         let j = mcp_json(&m());
-        assert!(j.contains("\"mail\": { \"command\": \"./.rigg/tools/mail/mcp.sh\" }"), "{j}");
+        assert!(j.contains("\"mail\": { \"command\": \"${RIGG_CONFIG}/tools/mail/mcp.sh\" }"), "{j}");
     }
 }
