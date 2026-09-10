@@ -359,6 +359,41 @@ def ingest(db, front: Front, cid: str, subject: str | None, inbox: dict | None) 
     rebuild_pairs(db, [cid])
 
 
+BOILERPLATE = re.compile(
+    r"^(bli med via|join with|more phone numbers|flere telefonnumre|"
+    r"personlig kode|pin|se all gjesteinformasjonen|view all guest|"
+    r"organiser|arrangør|gjester|guests|unsubscribe|avregistrer|"
+    r"this email was sent|denne e-posten)",
+    re.I,
+)
+
+
+def brief(text: str, limit: int = 240) -> str:
+    """One line of what the mail actually says.
+
+    A digest is read to decide which mail needs a person, and a calendar
+    invite or a marketing send is mostly neither prose nor signal: join links,
+    dial-in codes, guest lists, tracking URLs. Kept whole, one of them buries
+    the four mails that did need reading.
+    """
+    kept = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or BOILERPLATE.match(line):
+            continue
+        # A bare link carries nothing a reader of this digest can use, and
+        # tracking URLs run to hundreds of characters.
+        line = re.sub(r"https?://\S+", "<link>", line)
+        if line in ("<link>", "-", "—"):
+            continue
+        kept.append(line)
+        if sum(len(k) for k in kept) > limit:
+            break
+    one = " ".join(kept)
+    one = re.sub(r"\s+", " ", one).strip()
+    return one[:limit] + " […]" if len(one) > limit else one
+
+
 def recent(front: Front, hours: float) -> str:
     """Inbound mail from the last `hours`, as text for a prompt.
 
@@ -406,21 +441,26 @@ def recent(front: Front, hours: float) -> str:
     if not rows:
         return f"No mail arrived{where} in the last {hours:g} hours."
 
-    rows.sort(key=lambda r: r["at"])
-    out = [f"{len(rows)} message(s){where} in the last {hours:g} hours.", ""]
+    # Newest first. A day of mail runs to thousands of characters, and whatever
+    # is at the bottom is what gets truncated, skimmed past, or dropped from a
+    # prompt - so the mail most likely to still need answering goes on top.
+    rows.sort(key=lambda r: r["at"], reverse=True)
+    n_new = sum(1 for r in rows if not r["answered"])
+    out = [
+        f"{len(rows)} message(s){where} in the last {hours:g} hours, "
+        f"{n_new} unanswered. Newest first.",
+        "",
+    ]
     for r in rows:
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["at"]))
-        state = "answered" if r["answered"] else "UNANSWERED"
-        body = (r["body"] or "").strip()
-        if len(body) > 800:
-            body = body[:800] + " […]"
-        out += [
-            f"--- {when}  {r['from'] or 'unknown'}  [{state}]",
-            f"inbox: {r['inbox'] or '?'}   subject: {r['subject'] or '(none)'}",
-            f"id: {r['cid']}",
-            body,
-            "",
-        ]
+        when = time.strftime("%m-%d %H:%M", time.localtime(r["at"]))
+        state = "UNANSWERED" if not r["answered"] else "answered"
+        head = f"- {when}  {r['from'] or 'unknown'}  [{state}]  {r['cid']}"
+        subject = (r["subject"] or "(none)").strip()
+        out.append(head)
+        out.append(f"    {subject}")
+        body = brief(r["body"])
+        if body:
+            out.append(f"    {body}")
     return "\n".join(out)
 
 

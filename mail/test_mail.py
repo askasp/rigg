@@ -350,6 +350,26 @@ channel_is([{"id": "cha_1", "type": "gmail", "address": "a@b.no", "is_valid": Fa
            "error: inbox inb_x has no channel that sends email - it has gmail",
            "a broken channel is refused, and the error says what it found")
 
+# --- a digest is read to triage, not to reread the mail ---------------------
+
+check("a tracking url becomes a marker rather than 300 characters",
+      "<link>" in sync.brief("see https://x.example/a?b=" + "c" * 300)
+      and "cccc" not in sync.brief("see https://x.example/a?b=" + "c" * 300))
+check("a line that is only a link is dropped",
+      sync.brief("Hei\nhttps://x.example/tracking\nMvh") == "Hei Mvh")
+check("calendar and marketing boilerplate is dropped",
+      sync.brief("Kan vi flytte?\nBli med via Google Meet\nPersonlig kode: 1234")
+      == "Kan vi flytte?")
+check("blank lines do not become vertical space",
+      sync.brief("a\n\n\n\nb") == "a b")
+check("a long mail is cut and says so",
+      sync.brief("x " * 400).endswith("[…]")
+      and len(sync.brief("x " * 400)) < 260)
+check("a short mail is left exactly as it is",
+      sync.brief("Hvilke markører inngår i biologisk alder?")
+      == "Hvilke markører inngår i biologisk alder?")
+check("nothing at all is not an error", sync.brief("") == "" and sync.brief(None) == "")
+
 # --- a second draft on the same mail is spam, not help ----------------------
 
 CHANNELS["_results"] = [{"id": "cha_1", "type": "gmail", "address": "a@b.no"}]
