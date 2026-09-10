@@ -95,26 +95,16 @@ def instance() -> str:
 
 
 def scope() -> str | None:
-    """Which Front inbox this run may see. None means every one.
+    """Which Front inbox this run may act on. None means every one.
 
     A pipeline var reaches a step as RIGG_VAR_<NAME>, so `--var inbox="..."`
     on a cron scopes that job and nothing else.
+
+    Act on, not learn from: this gates reading a named thread and drafting a
+    reply. Searching past replies is deliberately not scoped - see `search`.
     """
     v = os.environ.get("RIGG_VAR_INBOX", "").strip()
     return v or None
-
-
-def scope_sql(alias: str = "p") -> tuple[str, list]:
-    """A WHERE fragment restricting to the scoped inbox, and its parameters."""
-    inbox = scope()
-    if not inbox:
-        return "", []
-    return (
-        f" AND {alias}.conversation_id IN"
-        " (SELECT conversation_id FROM conversation_inbox"
-        "   WHERE inbox_name = ? OR inbox_id = ?)",
-        [inbox, inbox],
-    )
 
 
 def db_path(inst: str | None = None) -> Path:
@@ -193,17 +183,30 @@ def search(db: sqlite3.Connection, question: str, limit: int = 5,
     answer: the tool an agent searches with, and `corpus search` in Slack,
     which exists to show what that agent will be shown. Two rankings would
     make the second one a lie the first time either was tuned.
+
+    Deliberately not scoped to the run's inbox. The inbox says which mail this
+    job may work on; it does not say which history it may learn from, and the
+    tenant boundary is the instance - one corpus, one organisation. Scoping
+    both meant a question nobody in your own inbox had answered had no
+    precedent, while a colleague's answer to exactly it sat unreachable in the
+    same database, which is most of the point of keeping one.
+
+    `author` is a preference, not a filter: their replies first, and everyone
+    else's when they have not answered anything like this.
     """
-    where, params = scope_sql("p")
-    rows = db.execute(
-        "SELECT p.*, bm25(pairs_fts, 1.0, 2.0) AS bm"
-        " FROM pairs_fts JOIN pairs p ON p.rowid = pairs_fts.rowid"
-        " WHERE pairs_fts MATCH ?"
-        + (" AND p.author_email = ?" if author else "")
-        + where
-        + " ORDER BY bm LIMIT ?",
-        ([fts_query(question)] + ([author] if author else []) + params + [CANDIDATES]),
-    ).fetchall()
+    def hits(who: str | None) -> list:
+        return db.execute(
+            "SELECT p.*, bm25(pairs_fts, 1.0, 2.0) AS bm"
+            " FROM pairs_fts JOIN pairs p ON p.rowid = pairs_fts.rowid"
+            " WHERE pairs_fts MATCH ?"
+            + (" AND p.author_email = ?" if who else "")
+            + " ORDER BY bm LIMIT ?",
+            [fts_query(question)] + ([who] if who else []) + [CANDIDATES],
+        ).fetchall()
+
+    rows = hits(author)
+    if author and not rows:
+        rows = hits(None)
 
     now = time.time()
     scored = []

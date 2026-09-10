@@ -36,11 +36,16 @@ def search_replies(
     as examples of house style and of what the answer usually is — not as facts
     to repeat, since an old reply can be out of date.
 
+    Searches the whole corpus, not just the inbox this run is scoped to: a
+    colleague's answer to the same question is precedent, and every result
+    names its `author` so you can see whose it is.
+
     Args:
         question: The text of the mail being answered. Paste it whole.
         limit: How many examples to return. Default 5.
-        author: Only replies written by this email address, if you want one
-            person's voice rather than the team's.
+        author: Prefer this person's replies. Not a filter — when they have
+            answered nothing like it, everyone else's replies come back
+            instead, which is usually what you want.
     """
     try:
         return corpus.search(DB, question, limit, author)
@@ -180,6 +185,16 @@ def create_draft(conversation_id: str, body: str, author_id: str | None = None) 
             "no author for the draft: set FRONT_AUTHOR_ID for this instance, or "
             "pass author_id. Without one Front attributes the draft to the API "
             "token and it is unsigned."
+        )
+    # The list step only ever offers this run's inbox, but that is a habit of
+    # the pipeline, not a rule. Joining a shared mailbox should not silently
+    # turn a drafting job loose in it - so the write path checks the scope
+    # itself, and widening it stays a deliberate edit to the schedule.
+    if not corpus.in_scope(DB, conversation_id):
+        raise ToolError(
+            f"{conversation_id} is not in {corpus.scope()}, which is the only "
+            "inbox this run may draft in. Widen it with --var inbox on the "
+            "schedule if that is really what you want."
         )
     already = existing_draft(conversation_id)
     if already:

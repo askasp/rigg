@@ -262,14 +262,24 @@ check("an id works as well as a name",
       corpus.in_scope(db, "c1") and (os.environ.__setitem__("RIGG_VAR_INBOX", "inb_a")
                                     or corpus.in_scope(db, "c1")))
 
+# Precedent is not scoped: the inbox says what a run may act on, not what it
+# may learn from, and a corpus only one person's inbox can reach is not shared
+# with anyone. The tenant boundary is the instance - one corpus, one org.
 os.environ["RIGG_VAR_INBOX"] = "Aksels inbox"
 scoped = corpus.search(db, "blodprøve", limit=50)
 os.environ["RIGG_VAR_INBOX"] = "Somebody elses inbox"
 elsewhere = corpus.search(db, "blodprøve", limit=50)
-check("a search only returns the scoped inbox",
-      len(elsewhere) == 0 and len(scoped) >= 0, f"{len(scoped)} vs {len(elsewhere)}")
+check("a search reaches every inbox, whatever this run is scoped to",
+      len(elsewhere) == len(scoped) and len(scoped) > 0,
+      f"{len(scoped)} vs {len(elsewhere)}")
 os.environ.pop("RIGG_VAR_INBOX")
 check("dropping the scope restores every inbox", corpus.scope() is None)
+
+# An author who has answered nothing like it must not mean "no precedent" -
+# that is how a question a colleague has answered gets no draft, forever.
+only_mine = corpus.search(db, "blodprøve", limit=50, author="nobody@nowhere.no")
+check("an author with no such reply falls back to everyone else's",
+      len(only_mine) == len(scoped), f"{len(only_mine)} vs {len(scoped)}")
 
 # --- a dropped connection is retried, not fatal ------------------------------
 
@@ -388,6 +398,20 @@ class FakeResp:
 
 
 M.requests.post = lambda *a, **k: (posted.append(k.get("json")), FakeResp)[1]
+
+# The scoped run must not draft in a mailbox it was merely able to see - the
+# case that arrives the day somebody joins a shared inbox.
+os.environ["RIGG_VAR_INBOX"] = "Aksels inbox"
+db.execute("INSERT OR REPLACE INTO conversation_inbox VALUES(?,?,?)",
+           ("c-elsewhere", "inb_hei", "hei@amino.no"))
+db.commit()
+try:
+    M.create_draft("c-elsewhere", "Hei")
+    check("a conversation outside this run's inbox is refused", False)
+except Exception as e:
+    check("a conversation outside this run's inbox is refused",
+          "only" in str(e) and "Aksels inbox" in str(e), str(e))
+os.environ.pop("RIGG_VAR_INBOX", None)
 
 MESSAGES["_results"] = [{"id": "msg_old", "is_draft": True}]
 out = M.create_draft("c-draft", "Hei igjen")
