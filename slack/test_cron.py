@@ -89,6 +89,14 @@ run('add "0 7 * * *" --task "draft replies to anything unanswered"', r)
 check("a quoted task survives as one argument",
       "draft replies to anything unanswered" in r.calls[0], str(r.calls))
 
+said = run("run morning-mail", Rigg(out="ok"))
+check("a run says something before it starts, not only when it ends",
+      len(said) == 2 and "morning-mail" in said[0] and "minute" in said[0], str(said))
+
+said = run("list", Rigg(out="a job"))
+check("a listing is instant, so it gets no such preamble",
+      len(said) == 1, str(said))
+
 r = Rigg()
 run("export adhoc", r)
 check("export passes through too", r.calls == [["cron", "export", "adhoc"]], str(r.calls))

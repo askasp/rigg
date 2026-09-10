@@ -208,6 +208,13 @@ def command(repo, prefix, rest, say, channel_id, *, pipelines, run_rigg,
     if not args or args[0] in ("list", "ls"):
         args = ["list", "--channel", f"#{prefix}"]
 
+    # A run is the one verb here that takes minutes. Without a word first,
+    # Slack looks like it swallowed the message, and the reflex is to send it
+    # again - which is how you get two of whatever it was doing.
+    if args and args[0] == "run":
+        which = f"`{args[1]}`" if len(args) > 1 else "it"
+        say(f"running {which} now — this takes a minute or two, result lands here.")
+
     code, out = run_rigg(repo, ["cron", *args], timeout=300)
     out = redact(out, creds.current()).strip()
     if not out:
