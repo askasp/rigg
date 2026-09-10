@@ -227,6 +227,37 @@ try:
 except ValueError as e:
     check("an unknown action is refused by name", "no [approvals.no-such-action]" in str(e))
 
+# --- the digest is written here, so prose cannot creep back in --------------
+
+d = outbox.digest(9, [
+    {"conversation_id": "cnv_a", "who": "julie@amino.no", "what": "flytt møtet",
+     "drafted": True},
+    {"conversation_id": "cnv_b", "who": "kari@x.no", "what": "hvilke markører",
+     "drafted": False, "note": "ingen presedens"},
+], "7 automatiske")
+check("the header is the three numbers worth knowing",
+      "*Siste 9 inn* · 1 utkast · 1 til deg" in d, d)
+check("what is already drafted comes before what is not",
+      d.index("cnv_a") < d.index("cnv_b"), d)
+check("every line carries the id to open", "`cnv_a`" in d and "`cnv_b`" in d, d)
+check("a reason is shown where there is one", "ingen presedens" in d, d)
+check("what was filtered out is one line at the end",
+      d.rstrip().endswith("_7 automatiske_"), d)
+check("a digest of two mails stays short enough to read at a glance",
+      len(d) < 400, str(len(d)))
+
+check("a quiet morning says so rather than printing an empty list",
+      "ingenting som trenger deg" in outbox.digest(4, []), outbox.digest(4, []))
+
+long = outbox.digest(1, [{"conversation_id": "c", "who": "a@b.no",
+                          "what": "x " * 200, "drafted": False}])
+check("a rambling summary is cut rather than posted whole",
+      len(long) < 300, str(len(long)))
+check("a newline cannot break the layout",
+      "\n" not in outbox.digest(1, [{"conversation_id": "c", "who": "a@b.no",
+                                     "what": "one\ntwo", "drafted": True}]
+                                 ).split("\n")[2])
+
 # --- the server actually starts, and offers what it says it does ------------
 
 import asyncio  # noqa: E402

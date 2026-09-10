@@ -115,21 +115,48 @@ EMAIL_CHANNELS = frozenset(
 )
 
 
+def inbox_of(conversation_id: str) -> tuple[str, str]:
+    """Which inbox a conversation is in, as (id, name).
+
+    The corpus knows this for anything it has synced, and Front knows it for
+    everything. Asking Front when the corpus has not caught up is what stops
+    drafting from inheriting the sync's staleness: mail that arrived twenty
+    minutes ago is exactly the mail worth answering, and it is never in the
+    corpus yet.
+    """
+    row = DB.execute(
+        "SELECT inbox_id, inbox_name FROM conversation_inbox WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if row and row["inbox_id"]:
+        return row["inbox_id"], row["inbox_name"] or ""
+    found = front_get(f"/conversations/{conversation_id}/inboxes").get("_results", [])
+    if not found:
+        raise ToolError(f"Front says {conversation_id} is in no inbox")
+    return found[0]["id"], found[0].get("name") or ""
+
+
+def draftable(conversation_id: str) -> str:
+    """The inbox id, once this run is allowed to draft in it."""
+    inbox_id, inbox_name = inbox_of(conversation_id)
+    want = corpus.scope()
+    if want and want not in (inbox_id, inbox_name):
+        raise ToolError(
+            f"{conversation_id} is in {inbox_name or inbox_id}, and this run may "
+            f"only draft in {want}. Widen it with --var inbox on the schedule if "
+            "that is really what you want."
+        )
+    return inbox_id
+
+
 def email_channel_for(conversation_id: str) -> str:
     """The channel a reply on this conversation should go out on.
 
     Front wants one explicitly, and the right one is an email channel on the
     inbox the conversation already lives in.
     """
-    row = DB.execute(
-        "SELECT inbox_id FROM conversation_inbox WHERE conversation_id = ?",
-        (conversation_id,),
-    ).fetchone()
-    if not row or not row["inbox_id"]:
-        raise ToolError(
-            f"no inbox recorded for {conversation_id}; run the sync before drafting"
-        )
-    channels = front_get(f"/inboxes/{row['inbox_id']}/channels").get("_results", [])
+    inbox_id = draftable(conversation_id)
+    channels = front_get(f"/inboxes/{inbox_id}/channels").get("_results", [])
     usable = [c for c in channels if c.get("is_valid", True)]
     for ch in usable:
         if ch.get("type") in EMAIL_CHANNELS:
@@ -140,7 +167,7 @@ def email_channel_for(conversation_id: str) -> str:
             return ch["id"]
     saw = ", ".join(sorted({str(c.get("type")) for c in channels})) or "none at all"
     raise ToolError(
-        f"inbox {row['inbox_id']} has no channel that sends email - it has {saw}"
+        f"inbox {inbox_id} has no channel that sends email - it has {saw}"
     )
 
 
@@ -186,16 +213,10 @@ def create_draft(conversation_id: str, body: str, author_id: str | None = None) 
             "pass author_id. Without one Front attributes the draft to the API "
             "token and it is unsigned."
         )
-    # The list step only ever offers this run's inbox, but that is a habit of
-    # the pipeline, not a rule. Joining a shared mailbox should not silently
-    # turn a drafting job loose in it - so the write path checks the scope
-    # itself, and widening it stays a deliberate edit to the schedule.
-    if not corpus.in_scope(DB, conversation_id):
-        raise ToolError(
-            f"{conversation_id} is not in {corpus.scope()}, which is the only "
-            "inbox this run may draft in. Widen it with --var inbox on the "
-            "schedule if that is really what you want."
-        )
+    # Before anything else: the list step only ever offers this run's inbox,
+    # but that is a habit of the pipeline, not a rule. Joining a shared mailbox
+    # should not silently turn a drafting job loose in it.
+    draftable(conversation_id)
     already = existing_draft(conversation_id)
     if already:
         return {

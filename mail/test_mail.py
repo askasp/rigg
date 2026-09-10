@@ -326,11 +326,16 @@ CHANNELS = {"_results": []}
 MESSAGES = {"_results": []}
 
 
+INBOXES = {"_results": []}
+
+
 def fake_front_get(path):
     if "/channels" in path:
         return CHANNELS
     if "/messages" in path:
         return MESSAGES
+    if "/inboxes" in path:
+        return INBOXES
     raise AssertionError(path)
 
 
@@ -410,7 +415,15 @@ try:
     check("a conversation outside this run's inbox is refused", False)
 except Exception as e:
     check("a conversation outside this run's inbox is refused",
-          "only" in str(e) and "Aksels inbox" in str(e), str(e))
+          "may only draft in Aksels inbox" in str(e), str(e))
+# Mail that arrived since the last sync is not in the corpus, and is exactly
+# the mail worth answering - so the inbox comes from Front rather than being
+# treated as unknown and refused.
+INBOXES["_results"] = [{"id": "inb_x", "name": "Some inbox"}]
+os.environ["RIGG_VAR_INBOX"] = "Some inbox"
+out = M.create_draft("c-never-synced", "Hei")
+check("a mail the sync has not reached yet can still be drafted",
+      out["created"] is True, str(out))
 os.environ.pop("RIGG_VAR_INBOX", None)
 
 MESSAGES["_results"] = [{"id": "msg_old", "is_draft": True}]

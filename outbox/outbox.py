@@ -179,6 +179,37 @@ def replies(ch: str, ts: str) -> list[dict]:
     return out.get("messages", [])[1:]
 
 
+def digest(arrived: int, items: list[dict], ignored: str = "") -> str:
+    """The morning summary, rendered here rather than written by an agent.
+
+    A digest is skimmed on a phone before anything else is opened, so its job
+    is to be scannable, not complete. Given free text a model writes prose -
+    counts restated in a sentence, a numbered list, a closing paragraph - and
+    the two lines that matter get buried. Taking the parts and doing the
+    writing here is what keeps it one glance.
+    """
+    need = [i for i in items if not i.get("drafted")]
+    drafted = [i for i in items if i.get("drafted")]
+    head = f"*Siste {arrived} inn* · {len(drafted)} utkast · {len(need)} til deg"
+    if not items:
+        head = f"*Siste {arrived} inn* · ingenting som trenger deg"
+
+    lines = [head, ""]
+    for i in drafted + need:
+        mark = "✏️" if i.get("drafted") else "🔴"
+        who = (i.get("who") or "ukjent").strip()
+        what = " ".join((i.get("what") or "").split())[:110]
+        note = " ".join((i.get("note") or "").split())[:60]
+        lines.append(f"{mark} *{who}* — {what}")
+        tail = f"`{i.get('conversation_id', '?')}`"
+        if note:
+            tail += f" · _{note}_"
+        lines.append(f"      {tail}")
+    if ignored:
+        lines += ["", f"_{' '.join(ignored.split())[:160]}_"]
+    return "\n".join(lines).strip()
+
+
 # ---------------------------------------------------------------- proposing
 
 def propose(action: str, key: str, title: str, draft: str,

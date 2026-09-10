@@ -49,10 +49,23 @@ def approvals() -> dict:
 
 
 @mcp.tool()
-def post_digest(text: str) -> str:
-    """Post the morning summary to the channel."""
+def post_digest(arrived: int, items: list[dict], ignored: str = "") -> str:
+    """Post the morning summary to the channel.
+
+    Give it the parts, not a written summary — the wording is done here so the
+    digest stays one glance on a phone.
+
+    Args:
+        arrived: How many messages arrived in the window.
+        items: One entry per mail that needs a person, each with
+            `conversation_id`, `who` (the sender), `what` (what they want, at
+            most a clause), `drafted` (true if a draft is waiting in Front) and
+            optionally `note` (a few words on why, e.g. "ingen presedens").
+        ignored: One short clause naming what was filtered out, e.g.
+            "7 automatiske: kalender, Vanta, annonser".
+    """
     try:
-        outbox.post(text)
+        outbox.post(outbox.digest(arrived, items, ignored))
     except outbox.SlackError as e:
         raise ToolError(str(e)) from e
     return "posted"
