@@ -45,6 +45,7 @@ HELP_GROUPS = [
         ("new <task>", "do it, review it, fix what the review found, and put it on a URL"),
         ("adopt <branch>", "the same on a branch that already exists — preview it, review it"),
         ("add <stack> <task>", "stack another branch on top of one"),
+        ("run <pipeline> <task>", "run it right here, no branch and no PR"),
     ]),
     ("While it is running", [
         ("say <stack> <message>", "a follow-up on that branch; commits and pushes it"),
@@ -668,6 +669,51 @@ def cmd_new(repo: Path, prefix: str, rest: str, say, channel: str,
     ts = ts_of(posted)
     if ts:
         remember_thread(repo, stack, channel, ts)
+
+
+def current_branch(repo: Path) -> str:
+    try:
+        r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                           cwd=repo, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def cmd_run(repo: Path, prefix: str, rest: str, say, channel: str,
+            pipeline: str | None = None, images: list[str] | None = None) -> None:
+    """Run a pipeline in the checkout itself, cutting no branch.
+
+    For a repo whose changes go straight to trunk - rigg's own config repo is
+    the case this exists for - where a branch and a PR are ceremony around a
+    two-line edit. Everywhere else `new` is still the answer, and this is why
+    a channel can be given a `commands` list that leaves `run` out.
+    """
+    rest, mods = split_modifiers(rest)
+    word, _, task = rest.partition(" ")
+    if pipeline is None and word:
+        pipeline, ambiguous = match_pipeline(repo, word)
+        if ambiguous:
+            say(ambiguous)
+            return
+        if pipeline:
+            rest = task.strip()
+    if pipeline is None:
+        say("which pipeline? `run <pipeline> <task>` — `pipelines` lists them")
+        return
+
+    args = ["run", "--detach", "--pipeline", pipeline] + mods
+    if rest:
+        args += ["--task", rest]
+    code, out = run_rigg(repo, args)
+    if code != 0:
+        say(f"could not start `{pipeline}`:\n```\n{out[:2500]}\n```")
+        return
+    branch = current_branch(repo) or "the checkout"
+    posted = say(with_plan(repo, f"running `{pipeline}` on `{branch}`", mods, pipeline))
+    ts = ts_of(posted)
+    if ts and branch:
+        remember_thread(repo, branch, channel, ts)
 
 
 def local_branch(repo: Path, name: str) -> str:
@@ -1436,6 +1482,7 @@ CHANNEL_LEVEL = {"stacks", "status", "list"}
 
 COMMANDS = {
     "new": cmd_new,
+    "run": cmd_run,
     "adopt": cmd_adopt,
     "add": cmd_add,
     "say": cmd_say,
