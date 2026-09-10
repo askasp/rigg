@@ -789,8 +789,12 @@ rigg secret set FRONT_API_TOKEN eyJ...       # identity, never in git
 rigg secret set SLACK_BOT_TOKEN xoxb-...
 rigg doctor                                  # names whatever is still missing
 crontab -e                                   # * * * * * .../cron.sh default tick
-systemctl --user start rigg-slack@default
+cp slack/env.example slack/.env              # the Slack app's two tokens
+./slack/run.sh                               # the bridge, one per workspace
 ```
+
+`slack/README.md` has a `rigg-slack@.service` template for running the bridge
+under systemd rather than in a terminal.
 
 A second machine is the same list. `rigg doctor` is the checklist: it names the
 config repo in force, every target and whether it is there, every secret a role
