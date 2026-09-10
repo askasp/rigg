@@ -1885,6 +1885,30 @@ fn log_path(root: &std::path::Path, branch: &str) -> Result<std::path::PathBuf> 
         .join(format!("{}.log", branch.replace('/', "-"))))
 }
 
+/// `origin/<trunk>` when `base` is the trunk, and `base` untouched otherwise.
+///
+/// The local trunk is only as new as the last time somebody pulled it by hand.
+/// A branch cut from it re-solves whatever landed since - and the agent then
+/// reports a fix that is already on main, or misses the commit that told it how
+/// the repo does this.
+///
+/// Only the trunk is refreshed. A stack builds on its own tip, and
+/// `origin/<tip>` is behind that for every step before the one that pushes -
+/// cutting from the remote there would silently drop the work being built on.
+fn fresh_base(from: &std::path::Path, cfg: &Config, base: &str) -> String {
+    if base != cfg.stack.trunk {
+        return base.to_string();
+    }
+    // A repo with no remote, or no network, still gets a branch: what it cuts
+    // from is then the local trunk, which is what it was before this existed.
+    let _ = util::git(from, &["fetch", "--quiet", "origin", base]);
+    let remote = format!("origin/{base}");
+    match util::git(from, &["rev-parse", "--verify", "--quiet", &remote]) {
+        Ok(_) => remote,
+        Err(_) => base.to_string(),
+    }
+}
+
 /// Create the worktree for `branch` off `base`, returning its path.
 fn create_worktree(
     root: &std::path::Path,
@@ -1899,7 +1923,7 @@ fn create_worktree(
         bail!("branch `{branch}` already exists");
     }
     let dest = worktree_dest(cfg, &from, branch);
-    util::git_worktree_add(&from, branch, base, &dest)?;
+    util::git_worktree_add(&from, branch, &fresh_base(&from, cfg, base), &dest)?;
     let mut path = dest.to_string_lossy().to_string();
     if path.is_empty() {
         path = util::worktree_path(&from, branch).unwrap_or_default();
@@ -4214,6 +4238,8 @@ fn which(cmd: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::Config;
+
     #[test]
     fn label_command_is_valid_shell() {
         let cmd = super::label_command("my-branch", "preview");
@@ -4227,5 +4253,65 @@ mod tests {
             .output()
             .expect("sh");
         assert!(out.status.success(), "invalid shell: {cmd}");
+    }
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("rigg-base-{tag}-{}", crate::util::random_name()));
+        std::fs::create_dir_all(&d).unwrap();
+        crate::util::git(&d, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        d
+    }
+
+    /// A branch cut from the local trunk is a branch cut from the last time
+    /// somebody pulled. The remote-tracking ref is what "off main" means.
+    #[test]
+    fn the_trunk_is_taken_from_the_remote() {
+        let origin = repo("origin");
+        std::fs::write(origin.join("f"), "one").unwrap();
+        crate::util::git(&origin, &["add", "-A"]).unwrap();
+        crate::util::git(&origin, &["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-qm", "one"]).unwrap();
+
+        let local = repo("local");
+        crate::util::git(&local, &["remote", "add", "origin",
+                                   &origin.to_string_lossy()]).unwrap();
+        crate::util::git(&local, &["fetch", "--quiet", "origin", "main"]).unwrap();
+        crate::util::git(&local, &["reset", "--hard", "--quiet", "origin/main"]).unwrap();
+
+        // main moves on the remote and nobody pulls.
+        std::fs::write(origin.join("f"), "two").unwrap();
+        crate::util::git(&origin, &["-c", "user.email=t@t", "-c", "user.name=t",
+                                    "commit", "-qam", "two"]).unwrap();
+
+        let cfg = Config::default();
+        assert_eq!(cfg.stack.trunk, "main");
+        let base = super::fresh_base(&local, &cfg, "main");
+        assert_eq!(base, "origin/main");
+        let head = crate::util::git(&local, &["rev-parse", &base]).unwrap();
+        let remote = crate::util::git(&origin, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), remote.trim(), "the fetch has to have happened");
+
+        std::fs::remove_dir_all(&origin).ok();
+        std::fs::remove_dir_all(&local).ok();
+    }
+
+    /// A stack builds on its own tip, which is ahead of `origin/<tip>` for
+    /// every step before the one that pushes.
+    #[test]
+    fn a_stacked_base_is_left_alone() {
+        let local = repo("stack");
+        let cfg = Config::default();
+        assert_eq!(super::fresh_base(&local, &cfg, "some-branch"), "some-branch");
+        std::fs::remove_dir_all(&local).ok();
+    }
+
+    /// No remote is not a reason to refuse a branch.
+    #[test]
+    fn a_repo_with_no_remote_still_cuts_from_its_trunk() {
+        let local = repo("bare");
+        let cfg = Config::default();
+        assert_eq!(super::fresh_base(&local, &cfg, "main"), "main");
+        std::fs::remove_dir_all(&local).ok();
     }
 }

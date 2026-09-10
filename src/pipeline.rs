@@ -34,9 +34,10 @@ impl Runner {
     pub fn new(
         root: PathBuf,
         cfg: Config,
-        vars: BTreeMap<String, String>,
+        mut vars: BTreeMap<String, String>,
         dry_run: bool,
     ) -> Self {
+        Self::set_review_file(&root, &mut vars, dry_run);
         Self {
             root,
             cfg,
@@ -48,6 +49,32 @@ impl Runner {
             total: 0,
             announce: true,
         }
+    }
+
+    /// Where the review step leaves its report for the fix step.
+    ///
+    /// The activity plane, not the target's `.rigg/`: a report written into
+    /// the checkout is untracked, unignored, and lands in the branch's diff
+    /// the moment a step runs `git add -A`. One file per branch, because two
+    /// branches previewing at once share this directory.
+    fn set_review_file(root: &std::path::Path, vars: &mut BTreeMap<String, String>, dry_run: bool) {
+        if vars.contains_key("review_file") {
+            return;
+        }
+        let Ok(dir) = util::state_dir(root).map(|d| d.join("review")) else {
+            return;
+        };
+        if !dry_run {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+        let slug = match vars.get("branch") {
+            Some(b) if !b.is_empty() => b.replace('/', "-"),
+            _ => "run".to_string(),
+        };
+        vars.insert(
+            "review_file".to_string(),
+            dir.join(format!("{slug}.md")).to_string_lossy().to_string(),
+        );
     }
 
     /// Tell the notify hook where the run has got to.
@@ -306,5 +333,49 @@ fn first_line(s: &str) -> String {
         format!("{}...", line.chars().take(69).collect::<String>())
     } else {
         line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rigg-pl-{tag}-{}", util::random_name()));
+        std::fs::create_dir_all(&d).unwrap();
+        util::git(&d, &["init", "--quiet"]).unwrap();
+        d
+    }
+
+    /// The review report is activity. Written into the checkout it is
+    /// untracked and no longer gitignored, so the next `git add -A` puts the
+    /// review of a branch inside that branch's own diff.
+    #[test]
+    fn the_review_report_lands_outside_the_checkout() {
+        let root = repo("review");
+        let mut vars = BTreeMap::new();
+        vars.insert("branch".to_string(), "rigg-tasks/a-thing".to_string());
+        Runner::set_review_file(&root, &mut vars, false);
+
+        let path = vars.get("review_file").expect("review_file");
+        assert!(!path.contains("/.rigg/review.md"), "{path}");
+        assert!(path.ends_with("rigg/review/rigg-tasks-a-thing.md"), "{path}");
+        assert!(
+            std::path::Path::new(path).parent().unwrap().is_dir(),
+            "the agent is told to write here, so the directory has to exist"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two branches reviewing at once would otherwise read each other's report.
+    #[test]
+    fn each_branch_gets_its_own_review_report() {
+        let root = repo("two");
+        let mut a = BTreeMap::from([("branch".to_string(), "one".to_string())]);
+        let mut b = BTreeMap::from([("branch".to_string(), "two".to_string())]);
+        Runner::set_review_file(&root, &mut a, false);
+        Runner::set_review_file(&root, &mut b, false);
+        assert_ne!(a["review_file"], b["review_file"]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
