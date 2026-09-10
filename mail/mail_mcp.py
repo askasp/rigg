@@ -139,11 +139,30 @@ def email_channel_for(conversation_id: str) -> str:
     )
 
 
+def existing_draft(conversation_id: str) -> str | None:
+    """The id of a draft already waiting on this conversation, if any.
+
+    A draft does not mark a conversation answered, so every overlapping run
+    would otherwise stack another one on the same thread - and the person who
+    has to clear them is the one this is supposed to be helping.
+    """
+    try:
+        d = front_get(f"/conversations/{conversation_id}/messages")
+    except Exception:
+        # Not being able to look is not permission to duplicate, but it is
+        # also not a reason to refuse: report it and let the caller decide.
+        return None
+    for m in d.get("_results", []):
+        if m.get("is_draft"):
+            return m.get("id")
+    return None
+
+
 def create_draft(conversation_id: str, body: str, author_id: str | None = None) -> dict:
     """Put a draft reply on a Front conversation, unsent.
 
     It appears in Front for a person to edit and send. Nothing is sent by this
-    tool.
+    tool. A conversation that already has a draft is left alone.
 
     Args:
         conversation_id: The Front conversation to reply on.
@@ -162,6 +181,17 @@ def create_draft(conversation_id: str, body: str, author_id: str | None = None) 
             "pass author_id. Without one Front attributes the draft to the API "
             "token and it is unsigned."
         )
+    already = existing_draft(conversation_id)
+    if already:
+        return {
+            "created": False,
+            "conversation_id": conversation_id,
+            "existing_draft_id": already,
+            "reason": (
+                f"{conversation_id} already has an unsent draft ({already}); "
+                "left alone rather than adding a second one"
+            ),
+        }
     r = requests.post(
         f"{FRONT}/conversations/{conversation_id}/drafts",
         headers={"Authorization": f"Bearer {token}"},
@@ -176,7 +206,7 @@ def create_draft(conversation_id: str, body: str, author_id: str | None = None) 
     if not r.ok:
         raise ToolError(f"Front {r.status_code} creating the draft: {r.text[:300]}")
     out = r.json()
-    return {"draft_id": out.get("id"), "conversation_id": conversation_id}
+    return {"created": True, "draft_id": out.get("id"), "conversation_id": conversation_id}
 
 
 # Registered only where writing is actually wanted, which is the `mailer` role

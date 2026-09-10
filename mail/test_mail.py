@@ -313,7 +313,18 @@ db.execute("INSERT OR REPLACE INTO conversation_inbox VALUES(?,?,?)",
 db.commit()
 
 CHANNELS = {"_results": []}
-M.front_get = lambda path: CHANNELS
+MESSAGES = {"_results": []}
+
+
+def fake_front_get(path):
+    if "/channels" in path:
+        return CHANNELS
+    if "/messages" in path:
+        return MESSAGES
+    raise AssertionError(path)
+
+
+M.front_get = fake_front_get
 M.DB = db
 
 def channel_is(types, expect, label):
@@ -338,5 +349,59 @@ channel_is([{"id": "cha_1", "type": "something-new", "address": "a@b.no"}], "cha
 channel_is([{"id": "cha_1", "type": "gmail", "address": "a@b.no", "is_valid": False}],
            "error: inbox inb_x has no channel that sends email - it has gmail",
            "a broken channel is refused, and the error says what it found")
+
+# --- a second draft on the same mail is spam, not help ----------------------
+
+CHANNELS["_results"] = [{"id": "cha_1", "type": "gmail", "address": "a@b.no"}]
+os.environ["FRONT_API_TOKEN"] = "test"
+os.environ["FRONT_AUTHOR_ID"] = "tea_1"
+
+posted = []
+
+
+class FakeResp:
+    ok = True
+
+    @staticmethod
+    def json():
+        return {"id": "msg_new"}
+
+
+M.requests.post = lambda *a, **k: (posted.append(k.get("json")), FakeResp)[1]
+
+MESSAGES["_results"] = [{"id": "msg_old", "is_draft": True}]
+out = M.create_draft("c-draft", "Hei igjen")
+check("a conversation that already has a draft is left alone",
+      out["created"] is False and out["existing_draft_id"] == "msg_old", str(out))
+check("and nothing was sent to Front", not posted, str(posted))
+check("the reason names the draft that is already there",
+      "msg_old" in out["reason"], out["reason"])
+
+MESSAGES["_results"] = [{"id": "msg_sent", "is_draft": False}]
+out = M.create_draft("c-draft", "Hei")
+check("a conversation with no draft still gets one",
+      out["created"] is True and out["draft_id"] == "msg_new", str(out))
+
+# A draft does not mark a conversation answered, so the run after this one sees
+# the same mail again - which is exactly when the guard has to hold.
+posted.clear()
+MESSAGES["_results"] = [{"id": "msg_new", "is_draft": True}]
+out = M.create_draft("c-draft", "Hei en tredje gang")
+check("the next run over the same window does not stack another",
+      out["created"] is False and not posted, str(out))
+
+
+def blows_up(path):
+    if "/messages" in path:
+        raise RuntimeError("Front is down")
+    return CHANNELS
+
+
+M.front_get = blows_up
+posted.clear()
+out = M.create_draft("c-draft", "Hei")
+check("not being able to look does not block drafting",
+      out["created"] is True, str(out))
+M.front_get = fake_front_get
 
 print(f"\n{ok} checks passed")
